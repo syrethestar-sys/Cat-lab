@@ -1,0 +1,28 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Photo {
+  id          String   @id @default(uuid())
+  storagePath String   @unique // where the file is in Storage, e.g. training/abc.jpg
+  label       String? // "cat", "not_cat", or null = not labeled yet
+  ground      String   @default("training") // "training" or "testing"
+  createdAt   DateTime @default(now())
+
+  @@map("photos")
+}
+
+model TrainingRun {
+  id        String   @id @default(uuid())
+  rounds    Int // how many rounds the model learned
+  accuracy  Float // 0 to 1, after the last round
+  modelUrl  String // "indexeddb://cat-lab-model"
+  createdAt DateTime @default(now())
+
+  @@map("training_runs")
+}

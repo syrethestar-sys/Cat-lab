@@ -13,27 +13,27 @@ Students teach a model in the **Training ground**, then check it in the **Testin
 4. **One step at a time.** Build and verify one step of the flow before starting the next.
 5. **No Claude attribution in git.** Don't add `Co-Authored-By: Claude` or "Generated with Claude Code" lines to commits or PRs. Commits are authored by the user only.
 
-## The flow (8 steps)
+## The flow (4 screens)
 
-Training ground:
-1. Upload photos → Supabase Storage
-2. Label each one → Prisma `Photo.label`
-3. Train → TensorFlow.js, in the browser
-4. Save the model → `model.json` to Storage
+Photos and labels go **through our API routes**. The browser never talks to Supabase directly, and the secret key stays on the server. Training and guessing run in the browser. The model is saved in **IndexedDB**, not Supabase.
 
-Testing ground (uses the same model):
-5. Load the model → `tf.loadLayersModel()`
-6. Add a new photo (never used in training)
-7. Model guesses → `model.predict()`
-8. Show the answer → "Cat, 87% sure"
+1. Upload → `POST /api/photos` → file to Storage (private bucket `photos`), row via Prisma, signed link valid 1 hour
+2. Label → `PATCH /api/photos/[id]` → `photos.label` is `cat` or `not_cat`
+3. Train → TensorFlow.js in the browser (10, 30 or 50 rounds, default 30) → model to `indexeddb://cat-lab-model` → `POST /api/training-runs`
+4. Test → load the model from IndexedDB → upload a photo with `ground = testing` → guess → "Cat, 87% sure"
+
+Tables: `photos` (id, storagePath, label, ground, createdAt) and `training_runs` (id, rounds, accuracy, modelUrl, createdAt).
 
 The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 
 ## Current state
 
-- Steps 1–2 work in the UI only. Photos are kept in browser memory, not in Supabase or Prisma yet.
-- Step 3 shows a locked "Start training" button. There is no model yet.
-- Steps 4–8 are not built.
+- Screens 1–2 work in the UI only. Photos are kept in browser memory, not in Supabase or Prisma yet.
+- Screen 3 shows a locked "Start training" button. There is no model yet.
+- Screen 4 is not built.
+- GUIDE.md Step 0 is done: packages, `.env.local` (incl. `SUPABASE_SERVICE_ROLE_KEY`), private `photos` bucket, `certs/supabase-ca.crt`, tables `photos` and `training_runs` migrated, helpers `app/_lib/db.ts` and `app/_lib/storage.ts` (verified: the server reads the database and Storage).
+- Next: GUIDE.md Step 1 (`/api/photos`).
+- Run Prisma with `--config prisma.config.ts` unless the extra `prisma7.config.ts` is gone.
 
 ## Code
 

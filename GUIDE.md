@@ -1,103 +1,62 @@
 # Cat Lab build guide
 
-This guide takes the app from what it does now (upload and label photos, kept in browser memory) to the full 8-step flow.
+This guide follows the six Cat Lab diagrams: How it flows, Who does what, Upload a photo, Label a photo, Train and test, Database tables.
 Do one step at a time. Finish its **Check it** list before you start the next step.
 
+## The plan in one picture
+
 ```
-TRAINING GROUND                                   TESTING GROUND
-1 Upload photos   → Supabase Storage              5 Load the model   → tf.loadLayersModel()
-2 Label each one  → Prisma Photo.label            6 Add a new photo  (never used in training)
-3 Train           → TensorFlow.js, in browser     7 Model guesses    → model.predict()
-4 Save the model  → model.json to Storage   ───►  8 Show the answer  → "Cat, 87% sure"
+BROWSER (student's computer)        OUR SERVER (Next.js)            CLOUD (Supabase)
+────────────────────────────        ────────────────────            ────────────────
+Pages: 4 screens (React+Tailwind)   API routes: check each request  Postgres: rows (photos, training_runs)
+TensorFlow.js: train + guess        Prisma: TypeScript → SQL        Storage: bucket "photos" (the files)
+IndexedDB: the saved model          Secret keys live here only
 ```
 
-The app keeps its 4 screens. This is where each guide step lives:
+- **Photos and labels go through our server.** The browser never talks to Supabase directly, so the secret key never reaches the browser.
+- **Training and guessing happen in the browser.** The trained model is saved in the browser's IndexedDB, not in Supabase.
+- **Rows go to Postgres, files go to Storage.** A row keeps only the file's path.
 
-| App screen | Guide steps |
-| --- | --- |
-| 1 Upload | 1 |
-| 2 Label | 2 |
-| 3 Train | 3, 4 |
-| 4 Test | 5, 6, 7, 8 |
+| App screen | Guide step | What happens |
+| --- | --- | --- |
+| 1 Upload | Step 1 | `POST /api/photos` |
+| 2 Label | Step 2 | `PATCH /api/photos/[id]` |
+| 3 Train | Step 3 | train, save model to IndexedDB, `POST /api/training-runs` |
+| 4 Test | Step 4 | load model from IndexedDB, upload a test photo, guess, show the answer |
 
-Versions used in this guide: Next.js 16.4, Prisma 7.10, `@supabase/supabase-js` 2.x, `@tensorflow/tfjs` 4.22.
+Versions used: Next.js 16.4, Prisma 7.10, `@supabase/supabase-js` 2.x, `@tensorflow/tfjs` 4.22.
 
 ---
 
 ## Step 0: Setup
 
-**Goal:** the app can talk to your Supabase project and its database.
+**Goal:** the server can reach your Supabase database and Storage, and the two tables from the diagram exist.
 
-### 0.1 Install packages
+### What is already done
 
-```bash
-npm install @supabase/supabase-js @tensorflow/tfjs@4.22.0 @prisma/client@7.10.1 @prisma/adapter-pg@7.10.1 dotenv
-npm install -D prisma@7.10.1
-```
+- Packages installed: `@supabase/supabase-js`, `@tensorflow/tfjs`, `@prisma/client`, `@prisma/adapter-pg`, `prisma`, `dotenv`.
+- `.env.local` has `DATABASE_URL` and `DIRECT_URL` with your real password.
+- `prisma.config.ts` reads `.env.local` and uses `DIRECT_URL` for migrations.
+- A first migration created a `Photo` table. Step 0.2 replaces it with the diagram's tables.
 
-Pin Prisma to `7.10.1`. The `latest` tag on npm can point to a release candidate.
+> Run every Prisma command with `--config prisma.config.ts` until you delete the extra file `prisma7.config.ts`. Prisma picks that file first, and it uses the wrong connection string.
 
-### 0.2 Environment variables
+### 0.1 Secret key and private bucket
 
-Create `.env.local` in the project root. It is already in `.gitignore`, so it won't be committed.
+1. Supabase → **Project Settings → API Keys**. Copy the **service_role** key (or the **secret** key).
+2. Add to `.env.local`. Note: no `NEXT_PUBLIC_` in front. This key must never reach the browser.
 
-```bash
-# Supabase dashboard → Project Settings → API
-NEXT_PUBLIC_SUPABASE_URL=https://YOUR-PROJECT.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-or-publishable-key
+   ```bash
+   SUPABASE_SERVICE_ROLE_KEY=your-secret-key
+   ```
 
-# Supabase dashboard → Connect → "Session pooler" connection string
-DATABASE_URL=postgresql://postgres.YOUR-PROJECT:YOUR-PASSWORD@aws-0-REGION.pooler.supabase.com:5432/postgres
-```
+3. Supabase → **Storage → New bucket** → name `photos` → keep **Public bucket OFF**.
+4. You do **not** need access rules (SQL policies). Only our server, with the secret key, can read or write the bucket. Photos are shown through signed links that expire after 1 hour.
+5. You do **not** need a `models` bucket. The model lives in the browser.
 
-Variables that start with `NEXT_PUBLIC_` are sent to the browser. Never put the `service_role` key in one.
+### 0.2 Database tables
 
-### 0.3 Storage buckets
-
-In Supabase → **Storage**, create two **public** buckets:
-
-- `photos`: the photos students upload
-- `models`: the trained model files
-
-Then in **SQL Editor**, run this so the browser can upload, overwrite and delete files:
-
-```sql
-create policy "cat lab insert" on storage.objects
-  for insert to anon with check (bucket_id in ('photos', 'models'));
-create policy "cat lab update" on storage.objects
-  for update to anon using (bucket_id in ('photos', 'models'));
-create policy "cat lab select" on storage.objects
-  for select to anon using (bucket_id in ('photos', 'models'));
-create policy "cat lab delete" on storage.objects
-  for delete to anon using (bucket_id in ('photos', 'models'));
-```
-
-> These rules let anyone with the app change these two buckets. That is fine for a class demo, but not for a real app. A real app adds login (Supabase Auth) first.
-
-### 0.4 Prisma
-
-```bash
-npx prisma init
-```
-
-This creates `prisma/schema.prisma` and `prisma.config.ts`.
-
-Edit **`prisma.config.ts`** so Prisma reads `.env.local`:
-
-```ts
-import { config } from "dotenv";
-import { defineConfig, env } from "prisma/config";
-
-config({ path: ".env.local" });
-
-export default defineConfig({
-  schema: "prisma/schema.prisma",
-  migrations: { path: "prisma/migrations" },
-  datasource: { url: env("DATABASE_URL") },
-});
-```
-
-Replace **`prisma/schema.prisma`** with:
+Replace `prisma/schema.prisma` with:
 
 ```prisma
 generator client {
@@ -110,250 +69,322 @@ datasource db {
 }
 
 model Photo {
-  id        String   @id @default(cuid())
-  path      String   // file path inside the "photos" bucket
-  url       String   // public URL, used by <img> and by training
-  label     String?  // "cat", "not", or null = not labeled yet
-  split     String   @default("train") // "train" or "test"
+  id          String   @id @default(uuid())
+  storagePath String   @unique // where the file is in Storage, e.g. training/abc.jpg
+  label       String? // "cat", "not_cat", or null = not labeled yet
+  ground      String   @default("training") // "training" or "testing"
+  createdAt   DateTime @default(now())
+
+  @@map("photos")
+}
+
+model TrainingRun {
+  id        String   @id @default(uuid())
+  rounds    Int // how many rounds the model learned
+  accuracy  Float // 0 to 1, after the last round
+  modelUrl  String // "indexeddb://cat-lab-model"
   createdAt DateTime @default(now())
+
+  @@map("training_runs")
 }
 ```
 
-Create the table and the client:
+Apply it:
 
 ```bash
-npx prisma migrate dev --name init
-npx prisma generate
+npx prisma migrate dev --name diagram_tables --config prisma.config.ts
 ```
 
-Add the generated folder to `.gitignore`:
+The old `Photo` table was empty, so if Prisma warns about data loss, say yes. Check that `npx prisma generate --config prisma.config.ts` ran.
 
-```
-/app/generated/
-```
+### 0.3 Server helpers
 
-### 0.5 Shared helpers
-
-**`app/_lib/supabase.ts`** (used in the browser):
-
-```ts
-import { createClient } from "@supabase/supabase-js";
-
-export const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-);
-```
-
-**`app/_lib/db.ts`** (server only):
+Delete `app/_lib/supabase.ts`. It used the public key in the browser, and we don't need that any more. Create **`app/_lib/storage.ts`**:
 
 ```ts
 import "server-only";
+import { createClient } from "@supabase/supabase-js";
+
+// Secret key: this file must never be imported by a Client Component.
+export const storage = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { persistSession: false } },
+).storage.from("photos");
+
+export const SIGNED_LINK_SECONDS = 60 * 60; // links last 1 hour
+```
+
+### 0.4 Database certificate
+
+Node does not trust Supabase's database certificate by default, so the app fails with `SELF_SIGNED_CERT_IN_CHAIN`. Give it the certificate:
+
+1. Supabase → **Database → Settings → SSL Configuration → Download certificate**.
+2. Save it as `certs/supabase-ca.crt` in the project. It is a public certificate, so it is safe to commit.
+3. Update **`app/_lib/db.ts`**:
+
+```ts
+import "server-only";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/app/generated/prisma/client";
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
-// Reuse one client while `next dev` hot-reloads.
 export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
-    adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
+    adapter: new PrismaPg({
+      // The adapter ignores Prisma's ?pgbouncer=true flag, so drop it.
+      connectionString: process.env.DATABASE_URL!.replace(/[?&]pgbouncer=true/, ""),
+      ssl: { ca: readFileSync(join(process.cwd(), "certs/supabase-ca.crt"), "utf8") },
+    }),
   });
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = db;
 ```
 
-Run `npm install server-only` if it isn't installed yet.
-
 ### Check it
 
-- [ ] `npx prisma studio` opens and shows an empty **Photo** table.
-- [ ] Supabase → Storage shows the `photos` and `models` buckets, both marked Public.
+- [ ] `npx prisma studio --config prisma.config.ts` shows empty `photos` and `training_runs` tables.
+- [ ] Supabase → Storage shows a **private** `photos` bucket.
 - [ ] `npx tsc --noEmit` passes.
+- [ ] `.env.local` has `SUPABASE_SERVICE_ROLE_KEY`, and `git status` does not list `.env.local`.
 
 ---
 
-# Training ground
+## Step 1: Upload photos
 
-## Step 1: Upload photos → Supabase Storage
+**Goal:** `POST /api/photos` stores the file in Storage, saves a row, and returns the photo with a 1-hour link. After a reload, the photos come back.
 
-**Goal:** a chosen photo is stored in the `photos` bucket and gets a row in the `Photo` table, so it is still there after a reload.
+```
+Student → Browser → POST /api/photos → ApiRoute → Storage (upload file)
+                                               → Prisma → Postgres (INSERT INTO photos)
+                                               → Storage (make a signed link, 1 hour)
+        ← 201 photo + link ←
+```
 
-### Server functions
+### The API route
 
-Create **`app/_lib/actions.ts`**. Every export is a Server Function the client can call:
+Create **`app/api/photos/route.ts`**:
 
 ```ts
-"use server";
+import { db } from "@/app/_lib/db";
+import { SIGNED_LINK_SECONDS, storage } from "@/app/_lib/storage";
 
-import { db } from "./db";
+const MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+const GROUNDS = ["training", "testing"];
 
-export async function addPhoto(path: string, url: string) {
-  const p = await db.photo.create({ data: { path, url } });
-  return { id: p.id, url: p.url, label: null };
+// Photos + links for one ground, oldest first.
+export async function GET(request: Request) {
+  const ground = new URL(request.url).searchParams.get("ground") ?? "training";
+  if (!GROUNDS.includes(ground)) return Response.json({ error: "Unknown ground" }, { status: 400 });
+
+  const rows = await db.photo.findMany({ where: { ground }, orderBy: { createdAt: "asc" } });
+  const { data } = await storage.createSignedUrls(rows.map((r) => r.storagePath), SIGNED_LINK_SECONDS);
+  const links = new Map(data?.map((d) => [d.path, d.signedUrl]));
+
+  return Response.json(rows.map((r) => ({ id: r.id, label: r.label, ground: r.ground, url: links.get(r.storagePath) ?? "" })));
 }
 
-export async function deletePhoto(id: string) {
+export async function POST(request: Request) {
+  const form = await request.formData();
+  const file = form.get("file");
+  const ground = String(form.get("ground") ?? "training");
+
+  // Check the request before talking to Supabase.
+  if (!(file instanceof File)) return Response.json({ error: "Send a file" }, { status: 400 });
+  if (!file.type.startsWith("image/")) return Response.json({ error: "Only image files" }, { status: 400 });
+  if (file.size > MAX_BYTES) return Response.json({ error: "Photo is bigger than 5 MB" }, { status: 413 });
+  if (!GROUNDS.includes(ground)) return Response.json({ error: "Unknown ground" }, { status: 400 });
+
+  const ext = file.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+  const storagePath = `${ground}/${crypto.randomUUID()}.${ext}`; // e.g. training/abc.jpg
+
+  const up = await storage.upload(storagePath, file, { contentType: file.type });
+  if (up.error) return Response.json({ error: up.error.message }, { status: 502 });
+
+  let photo;
+  try {
+    photo = await db.photo.create({ data: { storagePath, ground } });
+  } catch {
+    await storage.remove([storagePath]); // no row, so don't keep an orphan file
+    return Response.json({ error: "Could not save the photo" }, { status: 500 });
+  }
+
+  const { data } = await storage.createSignedUrl(storagePath, SIGNED_LINK_SECONDS);
+  return Response.json({ id: photo.id, label: photo.label, ground: photo.ground, url: data?.signedUrl ?? "" }, { status: 201 });
+}
+```
+
+Route Handlers are not cached, so `GET` always reads fresh data.
+
+### The delete route
+
+Create **`app/api/photos/[id]/route.ts`**. Step 2 adds `PATCH` to this same file.
+
+```ts
+import { db } from "@/app/_lib/db";
+import { storage } from "@/app/_lib/storage";
+
+export async function DELETE(_req: Request, ctx: RouteContext<"/api/photos/[id]">) {
+  const { id } = await ctx.params; // params is a Promise in Next.js 16
+  const photo = await db.photo.findUnique({ where: { id } });
+  if (!photo) return Response.json({ error: "Not found" }, { status: 404 });
+
+  await storage.remove([photo.storagePath]);
   await db.photo.delete({ where: { id } });
+  return new Response(null, { status: 204 });
 }
 ```
 
-### Load saved photos on the page
+### The screen (`CatLab.tsx`)
 
-In **`app/page.tsx`**, read the photos on the server and pass them to `CatLab`. With Cache Components on (see `next.config.ts`), a database read must be inside `<Suspense>` and after `await connection()`:
-
-```tsx
-import { connection } from "next/server";
-import { Suspense } from "react";
-import CatLab from "./_components/CatLab";
-import { db } from "./_lib/db";
-
-async function SavedPhotos() {
-  await connection(); // read the database on every request
-  const photos = await db.photo.findMany({ orderBy: { createdAt: "asc" } });
-  return (
-    <CatLab
-      initialPhotos={photos.map((p) => ({
-        id: p.id,
-        url: p.url,
-        label: p.label as "cat" | "not" | null,
-      }))}
-    />
-  );
-}
-
-export default function Home() {
-  return (
-    <main className="mx-auto flex max-w-[860px] flex-col gap-8 px-4 pt-8 pb-20">
-      {/* keep the existing header here */}
-      <Suspense fallback={<p className="text-center text-muted">Loading your photos…</p>}>
-        <SavedPhotos />
-      </Suspense>
-    </main>
-  );
-}
-```
-
-### Upload in `CatLab.tsx`
-
-1. Change `Photo.id` from `number` to `string`, and remove `nextId`.
-2. Take a prop: `{ initialPhotos }: { initialPhotos: Photo[] }`, then `useState<Photo[]>(initialPhotos)`.
-3. Replace `addFiles` and `removePhoto`:
+1. Change the photo type to `{ id: string; url: string; label: "cat" | "not_cat" | null }`. In `PhotoTile.tsx`, change the `Label` type to `"cat" | "not_cat"`, and the Not cat button and its border check to use `not_cat`.
+2. Remove `nextId` and `URL.createObjectURL`. The photos now come from the server.
+3. Load saved photos when the page opens:
 
 ```ts
-import { supabase } from "../_lib/supabase";
-import { addPhoto, deletePhoto } from "../_lib/actions";
+useEffect(() => {
+  fetch("/api/photos?ground=training")
+    .then((r) => r.json())
+    .then(setPhotos)
+    .catch(() => setError("Could not load your photos."))
+    .finally(() => setLoading(false));
+}, []);
+```
 
+4. Upload each chosen file, then add the photo to the screen:
+
+```ts
 async function addFiles(files: File[]) {
   const images = files.filter((f) => f.type.startsWith("image/"));
   setSkipped(files.length - images.length);
   for (const file of images) {
-    const path = `${crypto.randomUUID()}-${file.name}`;
-    const { error } = await supabase.storage.from("photos").upload(path, file);
-    if (error) { setError(error.message); continue; }
-    const url = supabase.storage.from("photos").getPublicUrl(path).data.publicUrl;
-    const photo = await addPhoto(path, url);
-    setPhotos((ps) => [...ps, photo]);
+    const body = new FormData();
+    body.append("file", file);
+    body.append("ground", "training");
+    const res = await fetch("/api/photos", { method: "POST", body });
+    if (!res.ok) { setError((await res.json()).error); continue; }
+    setPhotos((ps) => [...ps, await res.json()]);
   }
   changed();
 }
 
 async function removePhoto(id: string) {
-  const p = photos.find((x) => x.id === id);
-  if (!p) return;
-  const path = decodeURIComponent(p.url.split("/photos/")[1]);
-  await supabase.storage.from("photos").remove([path]);
-  await deletePhoto(id);
-  setPhotos((ps) => ps.filter((x) => x.id !== id));
-  changed();
+  const res = await fetch(`/api/photos/${id}`, { method: "DELETE" });
+  if (res.ok) { setPhotos((ps) => ps.filter((p) => p.id !== id)); changed(); }
 }
 ```
 
-4. Add `const [error, setError] = useState("")` and show it under the upload box in `text-red`.
-5. Upload goes straight from the browser to Supabase, so big photos never pass through a Server Function. Server Functions accept 1 MB by default.
+5. Add `const [error, setError] = useState("")` and `const [loading, setLoading] = useState(true)`. Show `error` in red under the upload box, and "Loading your photos…" while `loading` is true.
 
 ### Check it (Chrome DevTools)
 
-- [ ] Upload 2 photos. The **Network** tab shows a `POST` to `…supabase.co/storage/v1/object/photos/…` with status 200 for each.
-- [ ] Supabase → Storage → `photos` lists both files.
-- [ ] `npx prisma studio` shows 2 rows with `label` empty.
-- [ ] Reload the page. Both photos are still there.
-- [ ] Remove one. It disappears from the bucket and from the table.
-- [ ] **Console** has no errors.
+- [ ] Choose 2 photos. **Network** shows `POST /api/photos` with status **201** for each.
+- [ ] Open the response: it has `id`, `label: null`, `ground`, and a `url` that starts with your Supabase address and contains `token=`.
+- [ ] Supabase → Storage → `photos/training/` lists both files. Prisma Studio shows 2 rows with the same paths.
+- [ ] Reload. The photos are still there (`GET /api/photos?ground=training` returns 200).
+- [ ] Open a photo's `url` in a new tab: it shows the picture. Try the bucket's plain public URL: it is refused, because the bucket is private.
+- [ ] Choose a non-image file: the app shows an error and nothing is stored. **Console** has no unexpected errors.
 
 ---
 
-## Step 2: Label each one → Prisma `Photo.label`
+## Step 2: Label each one
 
-**Goal:** clicking Cat or Not cat saves the label, so it survives a reload.
+**Goal:** clicking Cat or Not cat sends `PATCH /api/photos/[id]` and the label is saved.
 
-Add to **`app/_lib/actions.ts`**:
+```
+Student clicks Cat → Browser → PATCH /api/photos/abc → ApiRoute → Prisma photo.update
+                                                    → Postgres UPDATE label
+                   ← 200 OK ←                      ← Photo object ←
+```
+
+Add `PATCH` to **`app/api/photos/[id]/route.ts`**:
 
 ```ts
-export async function setPhotoLabel(id: string, label: "cat" | "not") {
-  await db.photo.update({ where: { id }, data: { label } });
+const LABELS = ["cat", "not_cat"];
+
+export async function PATCH(request: Request, ctx: RouteContext<"/api/photos/[id]">) {
+  const { id } = await ctx.params;
+  const { label } = await request.json().catch(() => ({}));
+  if (!LABELS.includes(label)) return Response.json({ error: "label must be cat or not_cat" }, { status: 400 });
+
+  try {
+    const photo = await db.photo.update({ where: { id }, data: { label } });
+    return Response.json({ id: photo.id, label: photo.label });
+  } catch {
+    return Response.json({ error: "Not found" }, { status: 404 });
+  }
 }
 ```
 
-In **`CatLab.tsx`**, update the screen first so it feels instant, then save:
+In **`CatLab.tsx`**, update the screen first so it feels instant, then save. If saving fails, put the old label back:
 
 ```ts
-function setLabel(id: string, label: Label) {
+async function setLabel(id: string, label: Label) {
+  const before = photos.find((p) => p.id === id)?.label ?? null;
   setPhotos((ps) => ps.map((p) => (p.id === id ? { ...p, label } : p)));
   changed();
-  setPhotoLabel(id, label).catch(() => setError("Could not save that label. Try again."));
+  const res = await fetch(`/api/photos/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+  if (!res.ok) {
+    setPhotos((ps) => ps.map((p) => (p.id === id ? { ...p, label: before } : p)));
+    setError("Could not save that label. Try again.");
+  }
 }
 ```
 
 ### Check it
 
-- [ ] Label 1 photo Cat and 1 Not cat. Each click sends one request (a `POST` to `/` with a `Next-Action` header in the Network tab).
-- [ ] Prisma Studio shows `cat` and `not` in the `label` column.
-- [ ] Reload. The page reopens on Step 1, and after Next the labels are still set.
+- [ ] Click Cat on one photo and Not cat on another. **Network** shows `PATCH /api/photos/<id>` with status **200** and request body `{"label":"cat"}`.
+- [ ] Prisma Studio shows `cat` and `not_cat` in the `label` column.
+- [ ] Reload and open Step 2. The labels are still set.
+- [ ] Send a wrong label from the **Console**: `fetch("/api/photos/<id>", {method:"PATCH", body: JSON.stringify({label:"dog"})})` returns **400**.
 
 ---
 
-## Step 3: Train → TensorFlow.js, in the browser
+## Step 3: Train → save the model
 
-**Goal:** "Start training" trains a small model on the labeled photos, and the screen shows the round, progress and accuracy.
+**Goal:** "Start training" loads the labeled photos, trains in the browser, saves the model to IndexedDB, and records the run.
 
-### Hold some photos back for testing
-
-The model must never see test photos while training, or the test score means nothing. Add to **`actions.ts`**:
-
-```ts
-export async function saveSplit(testIds: string[]) {
-  await db.photo.updateMany({ data: { split: "train" } });
-  await db.photo.updateMany({ where: { id: { in: testIds } }, data: { split: "test" } });
-}
 ```
+Start training → GET labeled photos → Photos + links
+              → TensorFlow.js learns N rounds → save model to IndexedDB
+              → POST /api/training-runs → Prisma → Postgres (save run)
+```
+
+### Pick the number of rounds
+
+Show three small buttons above Start training: **10**, **30** and **50** rounds. Keep `30` selected at first. More rounds usually score better but take longer.
 
 ### The model code
 
-Create **`app/_lib/model.ts`**. This is the only file that imports TensorFlow.js.
+Create **`app/_lib/model.ts`**. Only this file imports TensorFlow.js, and only Client Components import this file.
 
 ```ts
 import * as tf from "@tensorflow/tfjs";
 
-export const SIZE = 64;   // photos are shrunk to 64 × 64 pixels
-export const ROUNDS = 10; // one round = a few passes over all photos
+export const SIZE = 64; // photos are shrunk to 64 × 64 pixels
+export const MODEL_URL = "indexeddb://cat-lab-model";
 
-// Load a photo URL into a 64 × 64 canvas, cropped to a square.
+// Load a photo link into a 64 × 64 canvas, cropped to a square.
 export function loadPixels(url: string): Promise<HTMLCanvasElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.crossOrigin = "anonymous"; // needed to read pixels from Supabase
+    img.crossOrigin = "anonymous"; // needed to read the pixels
     img.onload = () => {
       const c = document.createElement("canvas");
       c.width = c.height = SIZE;
       const s = Math.min(img.naturalWidth, img.naturalHeight);
-      c.getContext("2d")!.drawImage(
-        img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, SIZE, SIZE,
-      );
+      c.getContext("2d")!.drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, SIZE, SIZE);
       resolve(c);
     };
-    img.onerror = () => reject(new Error(`Could not load ${url}`));
+    img.onerror = () => reject(new Error("Could not load a photo"));
     img.src = url;
   });
 }
@@ -363,7 +394,7 @@ function toTensor(c: HTMLCanvasElement, flip = false) {
   return flip ? tf.reverse(t, 1) : t;
 }
 
-export function buildModel() {
+function buildModel() {
   const m = tf.sequential();
   m.add(tf.layers.conv2d({ inputShape: [SIZE, SIZE, 3], filters: 8, kernelSize: 3, activation: "relu", padding: "same" }));
   m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
@@ -373,184 +404,167 @@ export function buildModel() {
   m.add(tf.layers.globalAveragePooling2d({}));
   m.add(tf.layers.dense({ units: 32, activation: "relu" }));
   m.add(tf.layers.dropout({ rate: 0.3 }));
-  m.add(tf.layers.dense({ units: 1, activation: "sigmoid" })); // 1 = cat, 0 = not cat
+  m.add(tf.layers.dense({ units: 1, activation: "sigmoid" })); // near 1 = cat, near 0 = not cat
   m.compile({ optimizer: tf.train.adam(0.003), loss: "binaryCrossentropy", metrics: ["accuracy"] });
   return m;
 }
 
-// Train and report after every round: round number and accuracy (0 to 1).
+// One round = one full pass over the photos. Reports after every round.
 export async function train(
-  photos: { url: string; label: "cat" | "not" }[],
+  photos: { url: string; label: "cat" | "not_cat" }[],
+  rounds: number,
   onRound: (round: number, accuracy: number) => void,
 ) {
   const canvases = await Promise.all(photos.map((p) => loadPixels(p.url)));
-  // Each photo is used twice: as is and mirrored. More examples, same photos.
+  // Every photo is used twice: as is and mirrored. More examples from the same photos.
   const xs = tf.tidy(() => tf.stack([...canvases.map((c) => toTensor(c)), ...canvases.map((c) => toTensor(c, true))]));
   const labels = photos.map((p) => (p.label === "cat" ? 1 : 0));
   const ys = tf.tensor2d([...labels, ...labels], [labels.length * 2, 1]);
 
   const model = buildModel();
-  for (let round = 1; round <= ROUNDS; round++) {
-    const h = await model.fit(xs, ys, { epochs: 4, batchSize: 16, shuffle: true });
-    const acc = h.history.acc ?? h.history.accuracy;
-    onRound(round, Number(acc.at(-1)));
-  }
+  let accuracy = 0;
+  await model.fit(xs, ys, {
+    epochs: rounds,
+    batchSize: 16,
+    shuffle: true,
+    callbacks: {
+      onEpochEnd: async (epoch, logs) => {
+        accuracy = Number(logs?.acc ?? logs?.accuracy ?? 0);
+        onRound(epoch + 1, accuracy);
+        await tf.nextFrame(); // let the screen update
+      },
+    },
+  });
   xs.dispose();
   ys.dispose();
-  return model;
+
+  await model.save(MODEL_URL); // the model now lives in IndexedDB
+  return { model, accuracy };
 }
 ```
 
-### Wire it into Screen 3
+### The run record
 
-In **`CatLab.tsx`**:
+Create **`app/api/training-runs/route.ts`**:
 
-1. Add state: `const [rounds, setRounds] = useState<number[]>([])`, `const [training, setTraining] = useState(false)`, and a ref for the model: `const modelRef = useRef<LayersModel | null>(null)`.
-2. On "Start training":
+```ts
+import { db } from "@/app/_lib/db";
+
+export async function POST(request: Request) {
+  const { rounds, accuracy, modelUrl } = await request.json().catch(() => ({}));
+  if (!Number.isInteger(rounds) || rounds < 1) return Response.json({ error: "rounds must be a whole number" }, { status: 400 });
+  if (typeof accuracy !== "number" || accuracy < 0 || accuracy > 1) return Response.json({ error: "accuracy must be 0 to 1" }, { status: 400 });
+  if (typeof modelUrl !== "string") return Response.json({ error: "modelUrl is required" }, { status: 400 });
+
+  const run = await db.trainingRun.create({ data: { rounds, accuracy, modelUrl } });
+  return Response.json(run, { status: 201 });
+}
+```
+
+### Wire it into Screen 3 (`CatLab.tsx`)
 
 ```ts
 async function startTraining() {
-  setTraining(true);
-  setRounds([]);
-  // Keep 1 in 5 of each group for testing (only if the group has 3 or more).
-  const testIds: string[] = [];
-  for (const label of ["cat", "not"] as const) {
-    const group = photos.filter((p) => p.label === label).sort(() => Math.random() - 0.5);
-    const keep = group.length >= 3 ? Math.max(1, Math.floor(group.length / 5)) : 0;
-    testIds.push(...group.slice(0, keep).map((p) => p.id));
+  setTraining(true); setHistory([]); setError("");
+  try {
+    // Ask the server for the labeled training photos and fresh links.
+    const all: Photo[] = await (await fetch("/api/photos?ground=training")).json();
+    const labeled = all.filter((p): p is Photo & { label: Label } => p.label !== null);
+
+    const { train, MODEL_URL } = await import("../_lib/model"); // load TensorFlow.js only now
+    const { accuracy } = await train(labeled, rounds, (round, acc) => setHistory((h) => [...h, acc]));
+
+    await fetch("/api/training-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rounds, accuracy, modelUrl: MODEL_URL }),
+    });
+    setTrained(true);
+  } catch (e) {
+    setError(e instanceof Error ? e.message : "Training stopped.");
+  } finally {
+    setTraining(false);
   }
-  await saveSplit(testIds);
-  const trainSet = photos.filter((p) => !testIds.includes(p.id)) as { url: string; label: Label }[];
-  const { train } = await import("../_lib/model"); // load TensorFlow.js only when needed
-  modelRef.current = await train(trainSet, (round, acc) => setRounds((r) => [...r, acc]));
-  setTraining(false);
 }
 ```
 
-3. Show the parts you already have:
-   - `MainButton big onClick={startTraining}` with "Start training" (locked and saying "Training…" while `training` is true)
-   - Round: `{rounds.length} / 10`
-   - `<ProgressBar value={rounds.length * 10} label="Training progress" />`
-   - `<AccuracyChart />`: change it to take `values: number[]` and draw the line from them instead of the fixed path
-4. Next ("Next: Test the model") unlocks when `rounds.length === 10`.
+Show what the app already has: the **Round** counter `history.length / rounds`, `<ProgressBar value={(history.length / rounds) * 100} />`, and `<AccuracyChart />` (change it to draw the line from `history` instead of the fixed path). **Next: Test the model** unlocks when `trained` is true.
 
 ### Check it
 
-- [ ] Use at least 5 cats and 5 not cats. Click Start training.
-- [ ] The round counter goes 1 → 10 and the progress bar fills.
-- [ ] The accuracy line grows after each round.
-- [ ] **Console** has no errors. A CORS error means the bucket is not public (see 0.3).
-- [ ] Prisma Studio shows some photos with `split = test`.
-- [ ] The page stays usable while training. If it freezes, lower `epochs` in `train()`.
+- [ ] Use at least 5 cats and 5 not cats. Pick 30 rounds and click Start training.
+- [ ] The round counter goes up to 30, the bar fills, and the accuracy line grows.
+- [ ] **Application → IndexedDB → tensorflowjs → models_store** has an entry `cat-lab-model`.
+- [ ] **Network** shows `POST /api/training-runs` with status **201**. Prisma Studio shows a `training_runs` row with `rounds = 30` and `modelUrl = indexeddb://cat-lab-model`.
+- [ ] **Console** has no errors. A "tainted canvas" error means a photo link was loaded without `crossOrigin = "anonymous"`.
 
 ---
 
-## Step 4: Save the model → `model.json` to Storage
+## Step 4: Test with a new photo
 
-**Goal:** after training, the model is saved as two files in the `models` bucket, so the Testing ground can load it later.
+**Goal:** load the saved model, upload a new photo, and show "Cat, 87% sure".
 
-TensorFlow.js saves a model as `model.json` (its layers) plus `weights.bin` (what it learned). Add to **`model.ts`**:
+```
+Add test photo → Load model from IndexedDB → Guess photo (TensorFlow.js) → 0.92 = Cat → Show answer
+```
+
+Loading from IndexedDB proves the model was really saved. It also means the Testing ground works after you reload the page, without training again.
+
+### Load the model and guess
+
+Add to **`app/_lib/model.ts`**:
 
 ```ts
-import { supabase } from "./supabase";
+export function loadModel() {
+  return tf.loadLayersModel(MODEL_URL); // throws if nothing was saved yet
+}
 
-const FOLDER = "cat-model";
-
-export async function saveModel(model: tf.LayersModel) {
-  await model.save(
-    tf.io.withSaveHandler(async (artifacts) => {
-      const weights = tf.io.CompositeArrayBuffer.join(artifacts.weightData!);
-      const json = {
-        modelTopology: artifacts.modelTopology,
-        format: artifacts.format,
-        generatedBy: artifacts.generatedBy,
-        weightsManifest: [{ paths: ["weights.bin"], weights: artifacts.weightSpecs }],
-      };
-      const bucket = supabase.storage.from("models");
-      const opts = { upsert: true, cacheControl: "0" }; // overwrite, don't cache old versions
-      const a = await bucket.upload(`${FOLDER}/model.json`, new Blob([JSON.stringify(json)], { type: "application/json" }), opts);
-      const b = await bucket.upload(`${FOLDER}/weights.bin`, new Blob([weights]), opts);
-      if (a.error || b.error) throw a.error ?? b.error;
-      return { modelArtifactsInfo: { dateSaved: new Date(), modelTopologyType: "JSON" } };
-    }),
-  );
+export function predict(model: tf.LayersModel, canvas: HTMLCanvasElement) {
+  const p = tf.tidy(() => (model.predict(toTensor(canvas).expandDims(0)) as tf.Tensor).dataSync()[0]);
+  const isCat = p >= 0.5; // p is 0 to 1: near 1 = cat, near 0 = not cat
+  return { guess: isCat ? "cat" : "not_cat", sure: Math.round((isCat ? p : 1 - p) * 100) } as const;
 }
 ```
 
-Call it at the end of `startTraining()`: `await saveModel(modelRef.current)`. Then show "Model saved" under the chart.
+### Save the test photo as `testing`
 
-### Check it
-
-- [ ] After training, Supabase → Storage → `models/cat-model/` has `model.json` and `weights.bin`.
-- [ ] Open the public URL of `model.json` in a new tab. It shows JSON with `"weightsManifest"`.
-- [ ] Train again. Both files are replaced, not duplicated.
-
----
-
-# Testing ground
-
-Screen 4 does steps 5 to 8. It loads **the saved model** instead of reusing the one in memory. That proves the save worked and that the Testing ground doesn't depend on the Training ground being open.
-
-## Step 5: Load the model → `tf.loadLayersModel()`
-
-Add to **`model.ts`**:
-
-```ts
-export async function loadModel() {
-  const url = supabase.storage.from("models").getPublicUrl(`${FOLDER}/model.json`).data.publicUrl;
-  return tf.loadLayersModel(`${url}?v=${Date.now()}`); // ?v= skips the browser cache
-}
-```
-
-In `CatLab.tsx`, when Screen 4 opens, run `loadModel()` once and keep the result in a ref. Show "Loading the model…" until it is ready, and an error in `text-red` if it fails.
-
-### Check it
-
-- [ ] The Network tab shows `model.json` and then `weights.bin`, both with status 200.
-- [ ] Reload the page, go back to Screen 4, and the model loads again without retraining.
-
-## Step 6: Add a new photo (never used in training)
-
-Reuse `UploadBox` with one file at a time. **Don't** upload this photo to Supabase or save it in Prisma. Test photos must never join the training set.
+A test photo goes through the same `POST /api/photos`, but with `ground = "testing"`. Training only reads `ground = "training"`, so a test photo can never be used to train.
 
 ```ts
 async function guessFile(file: File) {
-  const url = URL.createObjectURL(file); // local only
-  const canvas = await loadPixels(url);
-  setGuess({ url, ...predict(modelRef.current!, canvas) });
+  const body = new FormData();
+  body.append("file", file);
+  body.append("ground", "testing");
+  const res = await fetch("/api/photos", { method: "POST", body });
+  if (!res.ok) { setError((await res.json()).error); return; }
+  const photo = await res.json();
+
+  const { loadModel, loadPixels, predict } = await import("../_lib/model");
+  const model = modelRef.current ?? (modelRef.current = await loadModel());
+  const result = predict(model, await loadPixels(photo.url));
+  setGuess({ url: photo.url, ...result });
 }
 ```
 
-For the score at the top of Screen 4, also run the model on photos with `split = "test"` and show each one with `ResultTile` and a "5 / 6 test photos right" score. Those photos were kept out of training in Step 3.
+Add `const modelRef = useRef<LayersModel | null>(null)` (import the `LayersModel` type from `@tensorflow/tfjs`). If `loadModel()` throws, show "Train the model first" with a Back button.
 
-## Step 7: Model guesses → `model.predict()`
+### Show the answer
 
-Add to **`model.ts`**:
-
-```ts
-export function predict(model: tf.LayersModel, canvas: HTMLCanvasElement) {
-  const p = tf.tidy(() => (model.predict(toTensor(canvas).expandDims(0)) as tf.Tensor).dataSync()[0]);
-  const isCat = p >= 0.5;
-  return { guess: isCat ? "cat" : "not", sure: Math.round((isCat ? p : 1 - p) * 100) } as const;
-}
-```
-
-`p` is a number from 0 to 1. Near 1 means "cat", near 0 means "not cat", and 0.5 means the model can't decide.
-
-## Step 8: Show the answer → "Cat, 87% sure"
-
-Change **`GuessPanel`** to take `src: string` instead of `icon` and `tone`, and show the photo with `<img src={src} …>`. Then:
+Change **`GuessPanel`** to take `src: string` (the photo link) instead of `icon` and `tone`, and show `<img src={src} …>`. Then, on Screen 4:
 
 ```tsx
 {guess && <GuessPanel src={guess.url} guess={guess.guess} sure={guess.sure} />}
 ```
 
-### Check it (steps 5 to 8)
+`GuessPanel` already shows "A cat" or "Not a cat", the bar, and "It is 87% sure."
 
-- [ ] Screen 4 shows the test score, and each test photo is marked Right (green) or Wrong (red).
-- [ ] Upload a cat photo the model has never seen. It shows "A cat" and a sure %.
-- [ ] Upload a non-cat. It shows "Not a cat".
-- [ ] No new file shows up in the `photos` bucket after testing.
+### Check it
+
+- [ ] Reload the page, go to Step 4, and upload a cat photo the model never saw. **Network** shows `POST /api/photos` (201) with `ground = testing`.
+- [ ] The screen shows "A cat" and a sure %. Upload a non-cat: it shows "Not a cat".
+- [ ] Supabase → Storage → `photos/testing/` has the new files. Training later ignores them.
+- [ ] Reload and go straight to Step 4 without training: the model still loads from IndexedDB.
+- [ ] Clear it (Application → IndexedDB → delete `cat-lab-model`), upload a photo: the app says to train first and does not crash.
 - [ ] **Console** has no errors.
 
 ---
@@ -559,10 +573,13 @@ Change **`GuessPanel`** to take `src: string` instead of `icon` and `tone`, and 
 
 | You see | Likely cause | Fix |
 | --- | --- | --- |
-| `new row violates row-level security policy` on upload | Storage policies missing | Run the SQL in 0.3 |
-| CORS / "tainted canvas" error while training | Bucket not public, or missing `img.crossOrigin` | Make the bucket public; keep `crossOrigin = "anonymous"` |
-| `Cannot find module '@/app/generated/prisma/client'` | Client not generated | `npx prisma generate` |
-| `DATABASE_URL` is undefined in Prisma commands | Prisma doesn't read `.env.local` on its own | Check the `config({ path: ".env.local" })` line in `prisma.config.ts` |
-| Dev overlay says **blocking-route** | Database read outside `<Suspense>` | Keep `SavedPhotos` inside `<Suspense>` (Step 1) |
-| Accuracy stays around 50% | Too few or too similar photos | Add 10+ of each group with different backgrounds |
-| Accuracy is 100% but the test score is bad | The model memorized the training photos | Add more photos, or use fewer rounds |
+| `SELF_SIGNED_CERT_IN_CHAIN` in the terminal | Database certificate missing | Step 0.4 |
+| `P1000 Authentication failed` | Placeholder or wrong password in `.env.local` | Reset the database password; check `.env.local`, not `.env` |
+| Prisma connects to port 6543 | It loaded `prisma7.config.ts` | Add `--config prisma.config.ts`, or delete that file |
+| `Invalid API key` / 401 from Storage | Wrong or missing `SUPABASE_SERVICE_ROLE_KEY` | Copy it again from Project Settings → API Keys, restart `npm run dev` |
+| Photo tile is broken after an hour | The signed link expired | Reload the page; `GET /api/photos` makes new links |
+| `413` on upload | Photo is over 5 MB | Use a smaller photo, or raise `MAX_BYTES` in the route |
+| Tainted canvas / CORS error in training | Image loaded without `crossOrigin` | Keep `img.crossOrigin = "anonymous"` in `loadPixels` |
+| Training freezes the page | Too many rounds or photos | Pick 10 rounds, or use fewer photos |
+| Accuracy stays near 50% | Too few or too similar photos | Add 10+ of each group, with different backgrounds |
+| Accuracy is 100% but guesses are wrong | The model memorized the training photos | Add more photos, or use fewer rounds |
