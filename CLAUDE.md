@@ -29,11 +29,11 @@ The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 ## Current state
 
 - Screen 1 (Upload) is done and verified: `/api/photos` (GET, POST) and `/api/photos/[id]` (DELETE) store files in Storage and rows in Postgres; photos survive a reload.
-- Screen 2 (Label) works in the UI only. Labels are kept in browser memory until GUIDE.md Step 2 (`PATCH /api/photos/[id]`) is built.
+- Screen 2 (Label) is done and verified: `PATCH /api/photos/[id]` saves `cat` / `not_cat`; labels survive a reload; a failed save undoes the click and shows an error.
 - Screen 3 shows a locked "Start training" button. There is no model yet.
 - Screen 4 is not built.
 - GUIDE.md Step 0 is done: packages, `.env.local` (incl. `SUPABASE_SERVICE_ROLE_KEY`), private `photos` bucket, `certs/supabase-ca.crt`, tables `photos` and `training_runs` migrated, helpers `app/_lib/db.ts` and `app/_lib/storage.ts` (verified: the server reads the database and Storage).
-- Next: GUIDE.md Step 2 (save labels).
+- Next: GUIDE.md Step 3 (train, save the model to IndexedDB, `POST /api/training-runs`).
 - Run Prisma with `--config prisma.config.ts` unless the extra `prisma7.config.ts` is gone.
 
 ## Code

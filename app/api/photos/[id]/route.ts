@@ -1,6 +1,29 @@
 import { db } from "@/app/_lib/db";
 import { storage } from "@/app/_lib/storage";
 
+const LABELS = ["cat", "not_cat"];
+
+export async function PATCH(
+  request: Request,
+  ctx: RouteContext<"/api/photos/[id]">,
+) {
+  const { id } = await ctx.params;
+  const { label } = await request.json().catch(() => ({}));
+  if (!LABELS.includes(label)) {
+    return Response.json(
+      { error: "label must be cat or not_cat" },
+      { status: 400 },
+    );
+  }
+
+  try {
+    const photo = await db.photo.update({ where: { id }, data: { label } });
+    return Response.json({ id: photo.id, label: photo.label });
+  } catch {
+    return Response.json({ error: "Not found" }, { status: 404 });
+  }
+}
+
 export async function DELETE(
   _req: Request,
   ctx: RouteContext<"/api/photos/[id]">,

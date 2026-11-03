@@ -80,9 +80,25 @@ export default function CatLab() {
     changed();
   }
 
-  function setLabel(id: string, label: Label) {
+  // Update the screen first so it feels instant, then save. Undo if saving fails.
+  async function setLabel(id: string, label: Label) {
+    const before = photos.find((p) => p.id === id)?.label ?? null;
+    setError("");
     setPhotos((ps) => ps.map((p) => (p.id === id ? { ...p, label } : p)));
     changed();
+
+    const res = await fetch(`/api/photos/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    }).catch(() => null);
+
+    if (!res?.ok) {
+      setPhotos((ps) =>
+        ps.map((p) => (p.id === id ? { ...p, label: before } : p)),
+      );
+      setError("Could not save that label. Try again.");
+    }
   }
 
   let content;
@@ -159,6 +175,7 @@ export default function CatLab() {
             />
           ))}
         </div>
+        {error && <p className="text-[15px] text-red">{error}</p>}
         <HelpBox title="Why label?">
           Your labels are the answers. The model compares its guesses with them
           to learn.
