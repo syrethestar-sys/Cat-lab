@@ -28,7 +28,7 @@ The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 
 ## Current state
 
-- Screen 1 (Upload) is done and verified: `/api/photos` (GET, POST) and `/api/photos/[id]` (DELETE) store files in Storage and rows in Postgres; photos survive a reload.
+- Screen 1 (Upload) is done and verified: `/api/photos` (GET, POST) and `/api/photos/[id]` (DELETE) store files in Storage and rows in Postgres; photos survive a reload. A "Remove all" button (two clicks to confirm) calls `DELETE /api/photos?ground=training`, which deletes the files and rows for that ground.
 - Screen 2 (Label) is done and verified: `PATCH /api/photos/[id]` saves `cat` / `not_cat`; labels survive a reload; a failed save undoes the click and shows an error.
 - Screen 3 (Train) is done and verified: pick 10/30/50 rounds (default 30), TensorFlow.js trains in the browser, the model is saved to IndexedDB `cat-lab-model`, and `POST /api/training-runs` records the run. Training code is `app/_lib/model.ts` (browser only).
 - Screen 4 (Test) is done and verified: loads the model from IndexedDB, uploads one photo with `ground = testing` (never used for training), guesses, and shows e.g. "A cat, 100% sure". A model saved in the browser unlocks Step 4 after a reload (`app/_lib/saved-model.ts`).

@@ -31,6 +31,8 @@ export default function CatLab() {
   const [skipped, setSkipped] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [rounds, setRounds] = useState<Rounds>(30);
   const [training, setTraining] = useState(false);
   const [trained, setTrained] = useState(false);
@@ -48,6 +50,13 @@ export default function CatLab() {
       .catch(() => setError("Could not load your photos. Reload to try again."))
       .finally(() => setLoading(false));
   }, []);
+
+  // "Remove all" needs a second click. If you don't, it goes back to normal.
+  useEffect(() => {
+    if (!confirmClear) return;
+    const timer = setTimeout(() => setConfirmClear(false), 5000);
+    return () => clearTimeout(timer);
+  }, [confirmClear]);
 
   // A model saved in this browser earlier unlocks Step 4, so you can test without training again.
   useEffect(() => {
@@ -123,6 +132,26 @@ export default function CatLab() {
     }
     setPhotos((ps) => ps.filter((p) => p.id !== id));
     changed();
+  }
+
+  async function removeAll() {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      return;
+    }
+    setConfirmClear(false);
+    setClearing(true);
+    setError("");
+    try {
+      const res = await fetch("/api/photos?ground=training", { method: "DELETE" });
+      if (!res.ok) throw new Error();
+      setPhotos([]);
+      changed();
+    } catch {
+      setError("Could not remove all photos. Reload to see what is left.");
+    } finally {
+      setClearing(false);
+    }
   }
 
   // Update the screen first so it feels instant, then save. Undo if saving fails.
@@ -246,8 +275,24 @@ export default function CatLab() {
         )}
         {photos.length > 0 && (
           <>
-            <div className="flex flex-wrap gap-2.5">
+            <div className="flex flex-wrap items-center gap-2.5">
               <Pill tone="open">{plural(photos.length, "photo")} added</Pill>
+              <button
+                type="button"
+                onClick={removeAll}
+                disabled={clearing}
+                className={`rounded-full border-2 px-3.5 py-1 text-[15px] font-bold focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-blue ${
+                  confirmClear
+                    ? "border-red bg-red text-white"
+                    : "border-line text-red hover:border-red"
+                } ${clearing ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+              >
+                {clearing
+                  ? "Removing…"
+                  : confirmClear
+                    ? `Click again to remove all ${photos.length}`
+                    : "Remove all"}
+              </button>
             </div>
             <div className={photoGrid}>
               {photos.map((p) => (
