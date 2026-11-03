@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import type { LayersModel } from "@tensorflow/tfjs";
+import { useEffect, useRef, useState } from "react";
 import AccuracyChart from "./AccuracyChart";
 import BackButton from "./BackButton";
 import Card from "./Card";
+import GuessPanel from "./GuessPanel";
 import HelpBox from "./HelpBox";
 import MainButton from "./MainButton";
 import PhotoTile, { type Label } from "./PhotoTile";
@@ -13,8 +15,10 @@ import RoundsPicker, { type Rounds } from "./RoundsPicker";
 import StepCard from "./StepCard";
 import Steps from "./Steps";
 import UploadBox from "./UploadBox";
+import { hasSavedModel } from "../_lib/saved-model";
 
 type Photo = { id: string; url: string; label: Label | null };
+type Guess = { url: string; guess: "cat" | "not_cat"; sure: number };
 
 const photoGrid = "grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-3";
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -31,6 +35,10 @@ export default function CatLab() {
   const [training, setTraining] = useState(false);
   const [trained, setTrained] = useState(false);
   const [history, setHistory] = useState<number[]>([]); // accuracy after each round
+  const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "missing">("idle");
+  const [guess, setGuess] = useState<Guess | null>(null);
+  const [guessing, setGuessing] = useState(false);
+  const modelRef = useRef<LayersModel | null>(null);
 
   // Saved photos come from the server, with fresh 1-hour links.
   useEffect(() => {
@@ -40,6 +48,33 @@ export default function CatLab() {
       .catch(() => setError("Could not load your photos. Reload to try again."))
       .finally(() => setLoading(false));
   }, []);
+
+  // A model saved in this browser earlier unlocks Step 4, so you can test without training again.
+  useEffect(() => {
+    hasSavedModel().then((saved) => {
+      if (saved) setReached((r) => Math.max(r, 4));
+    });
+  }, []);
+
+  // Load the saved model from IndexedDB when Step 4 opens.
+  useEffect(() => {
+    if (step !== 4 || modelRef.current) return;
+    let cancelled = false;
+    setModelState("loading");
+    import("../_lib/model")
+      .then((m) => m.loadModel())
+      .then((model) => {
+        if (cancelled) return;
+        modelRef.current = model;
+        setModelState("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setModelState("missing");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [step]);
 
   const cats = photos.filter((p) => p.label === "cat").length;
   const nots = photos.filter((p) => p.label === "not_cat").length;
@@ -116,6 +151,11 @@ export default function CatLab() {
     setTrained(false);
     setHistory([]);
     setError("");
+    setGuess(null);
+    // The old model is about to be replaced, so forget it.
+    modelRef.current?.dispose();
+    modelRef.current = null;
+    setModelState("idle");
     try {
       // Ask the server for the labeled photos, with fresh 1-hour links.
       const res = await fetch("/api/photos?ground=training");
@@ -150,6 +190,38 @@ export default function CatLab() {
       setError(e instanceof Error ? e.message : "Training stopped.");
     } finally {
       setTraining(false);
+    }
+  }
+
+  // The test photo is saved with ground = "testing", so training never uses it.
+  async function guessFile(files: File[]) {
+    const file = files[0];
+    const model = modelRef.current;
+    if (!file || !model) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Only image files can be tested.");
+      return;
+    }
+    setError("");
+    setGuessing(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      body.append("ground", "testing");
+      const res = await fetch("/api/photos", { method: "POST", body });
+      if (!res.ok) {
+        const msg = (await res.json().catch(() => null))?.error;
+        throw new Error(msg ?? "Could not upload that photo.");
+      }
+      const photo: Photo = await res.json();
+
+      const { loadPixels, predict } = await import("../_lib/model");
+      const result = predict(model, await loadPixels(photo.url));
+      setGuess({ url: photo.url, ...result });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not test that photo.");
+    } finally {
+      setGuessing(false);
     }
   }
 
@@ -310,8 +382,36 @@ export default function CatLab() {
     content = (
       <>
         <StepCard step={4} text="Test with new photos" />
-        <HelpBox title="Not built yet.">
-          Your model is trained and saved in this browser. Testing comes next.
+        {modelState === "loading" && (
+          <p className="text-center text-muted">Loading the model…</p>
+        )}
+        {modelState === "missing" && (
+          <HelpBox title="No model yet.">
+            There is no trained model saved in this browser. Go back and train
+            it first.
+          </HelpBox>
+        )}
+        {modelState === "ready" && (
+          <>
+            <UploadBox
+              multiple={false}
+              title={guess ? "Try another photo" : "Choose a photo to test"}
+              text="One photo at a time, or drop it here"
+              onFiles={guessFile}
+            />
+            {guessing && (
+              <p className="text-center text-muted">Looking at your photo…</p>
+            )}
+            {guess && !guessing && (
+              <GuessPanel src={guess.url} guess={guess.guess} sure={guess.sure} />
+            )}
+          </>
+        )}
+        {error && <p className="text-[15px] text-red">{error}</p>}
+        <HelpBox title="Why test?">
+          Test photos are saved apart from your training photos, so the model
+          never learns from them. That shows how it does on photos it has not
+          seen.
         </HelpBox>
         <div className="flex flex-wrap justify-between gap-3">
           <BackButton onClick={() => go(3)} />

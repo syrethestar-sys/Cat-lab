@@ -44,7 +44,7 @@ next-env.d.ts
 /app/generated/prisma
 
 # tool state (editor/agent plugins)
-/.omc/
+.omc/
 /.claude/
 /.agents/
 /.windsurf/

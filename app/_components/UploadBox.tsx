@@ -7,9 +7,15 @@ type UploadBoxProps = {
   title: string;
   text: string;
   onFiles: (files: File[]) => void;
+  multiple?: boolean;
 };
 
-export default function UploadBox({ title, text, onFiles }: UploadBoxProps) {
+export default function UploadBox({
+  title,
+  text,
+  onFiles,
+  multiple = true,
+}: UploadBoxProps) {
   const [over, setOver] = useState(false);
 
   return (
@@ -32,7 +38,7 @@ export default function UploadBox({ title, text, onFiles }: UploadBoxProps) {
       <input
         type="file"
         accept="image/*"
-        multiple
+        multiple={multiple}
         className="sr-only"
         onChange={(e) => {
           onFiles([...(e.target.files ?? [])]);

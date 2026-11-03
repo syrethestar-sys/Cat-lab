@@ -526,7 +526,7 @@ Show what the app already has: the **Round** counter `history.length / rounds`, 
 Add test photo → Load model from IndexedDB → Guess photo (TensorFlow.js) → 0.92 = Cat → Show answer
 ```
 
-Loading from IndexedDB proves the model was really saved. It also means the Testing ground works after you reload the page, without training again.
+Loading from IndexedDB proves the model was really saved. After a reload, a saved model unlocks Step 4 on its own (a small check in `app/_lib/saved-model.ts` looks for the `cat-lab-model` entry without loading TensorFlow.js). It also means the Testing ground works after you reload the page, without training again.
 
 ### Load the model and guess
 

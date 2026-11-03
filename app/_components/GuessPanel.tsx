@@ -1,28 +1,21 @@
-import type { LucideIcon } from "lucide-react";
 import ProgressBar from "./ProgressBar";
 
 type GuessPanelProps = {
-  icon: LucideIcon;
-  tone: string;
-  guess: "cat" | "not";
+  src: string;
+  guess: "cat" | "not_cat";
   sure: number;
 };
 
-export default function GuessPanel({
-  icon: Icon,
-  tone,
-  guess,
-  sure,
-}: GuessPanelProps) {
+export default function GuessPanel({ src, guess, sure }: GuessPanelProps) {
   const isCat = guess === "cat";
 
   return (
     <div className="grid items-center gap-5 sm:grid-cols-[150px_1fr]">
-      <div
-        className={`grid aspect-square w-[150px] place-items-center rounded-xl border-2 border-line ${tone}`}
-      >
-        <Icon className="h-auto w-[60%]" />
-      </div>
+      <img
+        src={src}
+        alt="The photo you tested"
+        className="aspect-square w-[150px] rounded-xl border-2 border-line object-cover"
+      />
       <div className="grid gap-2.5">
         <span className="text-muted">The model thinks this is</span>
         <span

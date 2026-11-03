@@ -119,3 +119,21 @@ export async function train(
   }
   return accuracy;
 }
+
+// Throws if no model has been saved yet.
+export function loadModel() {
+  return tf.loadLayersModel(MODEL_URL);
+}
+
+// p is 0 to 1: near 1 = cat, near 0 = not cat, 0.5 = can't decide.
+export function predict(model: tf.LayersModel, canvas: HTMLCanvasElement) {
+  const p = tf.tidy(
+    () =>
+      (model.predict(toTensor(canvas).expandDims(0)) as tf.Tensor).dataSync()[0],
+  );
+  const isCat = p >= 0.5;
+  return {
+    guess: isCat ? ("cat" as const) : ("not_cat" as const),
+    sure: Math.round((isCat ? p : 1 - p) * 100),
+  };
+}

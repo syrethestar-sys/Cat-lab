@@ -31,9 +31,9 @@ The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 - Screen 1 (Upload) is done and verified: `/api/photos` (GET, POST) and `/api/photos/[id]` (DELETE) store files in Storage and rows in Postgres; photos survive a reload.
 - Screen 2 (Label) is done and verified: `PATCH /api/photos/[id]` saves `cat` / `not_cat`; labels survive a reload; a failed save undoes the click and shows an error.
 - Screen 3 (Train) is done and verified: pick 10/30/50 rounds (default 30), TensorFlow.js trains in the browser, the model is saved to IndexedDB `cat-lab-model`, and `POST /api/training-runs` records the run. Training code is `app/_lib/model.ts` (browser only).
-- Screen 4 (Test) is a placeholder: "Not built yet".
+- Screen 4 (Test) is done and verified: loads the model from IndexedDB, uploads one photo with `ground = testing` (never used for training), guesses, and shows e.g. "A cat, 100% sure". A model saved in the browser unlocks Step 4 after a reload (`app/_lib/saved-model.ts`).
 - GUIDE.md Step 0 is done: packages, `.env.local` (incl. `SUPABASE_SERVICE_ROLE_KEY`), private `photos` bucket, `certs/supabase-ca.crt`, tables `photos` and `training_runs` migrated, helpers `app/_lib/db.ts` and `app/_lib/storage.ts` (verified: the server reads the database and Storage).
-- Next: GUIDE.md Step 4 (load the model from IndexedDB, upload a test photo with `ground = testing`, guess, show the answer).
+- All 4 screens are built. Remaining ideas: a test score on labeled test photos, real-photo accuracy checks, README.
 - Run Prisma with `--config prisma.config.ts` unless the extra `prisma7.config.ts` is gone.
 
 ## Code
