@@ -95,7 +95,22 @@ Apply it:
 npx prisma migrate dev --name diagram_tables --config prisma.config.ts
 ```
 
-The old `Photo` table was empty, so if Prisma warns about data loss, say yes. Check that `npx prisma generate --config prisma.config.ts` ran.
+The old `Photo` table was empty, so if Prisma warns about data loss, say yes.
+
+Then turn on row-level security. Supabase's public Data API would otherwise let anyone with the anon key read and change these tables:
+
+```bash
+npx prisma migrate dev --create-only --name enable_rls --config prisma.config.ts
+```
+
+Put this in the new `migration.sql`, then run `npx prisma migrate dev --config prisma.config.ts`:
+
+```sql
+ALTER TABLE "photos" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "training_runs" ENABLE ROW LEVEL SECURITY;
+```
+
+With no policies, only the server can reach the tables. Prisma connects as the table owner, so the app keeps working. Check that `npx prisma generate --config prisma.config.ts` ran.
 
 ### 0.3 Server helpers
 
@@ -423,23 +438,26 @@ export async function train(
 
   const model = buildModel();
   let accuracy = 0;
-  await model.fit(xs, ys, {
-    epochs: rounds,
-    batchSize: 16,
-    shuffle: true,
-    callbacks: {
-      onEpochEnd: async (epoch, logs) => {
-        accuracy = Number(logs?.acc ?? logs?.accuracy ?? 0);
-        onRound(epoch + 1, accuracy);
-        await tf.nextFrame(); // let the screen update
+  try {
+    await model.fit(xs, ys, {
+      epochs: rounds,
+      batchSize: 16,
+      shuffle: true,
+      callbacks: {
+        onEpochEnd: async (epoch, logs) => {
+          accuracy = Number(logs?.acc ?? logs?.accuracy ?? 0);
+          onRound(epoch + 1, accuracy);
+          await tf.nextFrame(); // let the screen update
+        },
       },
-    },
-  });
-  xs.dispose();
-  ys.dispose();
-
-  await model.save(MODEL_URL); // the model now lives in IndexedDB
-  return { model, accuracy };
+    });
+    await model.save(MODEL_URL); // the model now lives in IndexedDB
+  } finally {
+    xs.dispose();
+    ys.dispose();
+    model.dispose(); // free memory; Step 4 loads the model back from IndexedDB
+  }
+  return accuracy;
 }
 ```
 
@@ -472,7 +490,7 @@ async function startTraining() {
     const labeled = all.filter((p): p is Photo & { label: Label } => p.label !== null);
 
     const { train, MODEL_URL } = await import("../_lib/model"); // load TensorFlow.js only now
-    const { accuracy } = await train(labeled, rounds, (round, acc) => setHistory((h) => [...h, acc]));
+    const accuracy = await train(labeled, rounds, (_round, acc) => setHistory((h) => [...h, acc]));
 
     await fetch("/api/training-runs", {
       method: "POST",
@@ -488,7 +506,7 @@ async function startTraining() {
 }
 ```
 
-Show what the app already has: the **Round** counter `history.length / rounds`, `<ProgressBar value={(history.length / rounds) * 100} />`, and `<AccuracyChart />` (change it to draw the line from `history` instead of the fixed path). **Next: Test the model** unlocks when `trained` is true.
+Show what the app already has: the **Round** counter `history.length / rounds`, `<ProgressBar value={(history.length / rounds) * 100} />`, and `<AccuracyChart values={history} rounds={rounds} />` (it now draws the line from `history`; the x axis runs to the number of rounds). **Next: Test the model** unlocks when `trained` is true.
 
 ### Check it
 

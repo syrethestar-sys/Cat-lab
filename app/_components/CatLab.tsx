@@ -1,12 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import AccuracyChart from "./AccuracyChart";
 import BackButton from "./BackButton";
 import Card from "./Card";
 import HelpBox from "./HelpBox";
 import MainButton from "./MainButton";
 import PhotoTile, { type Label } from "./PhotoTile";
 import Pill from "./Pill";
+import ProgressBar from "./ProgressBar";
+import RoundsPicker, { type Rounds } from "./RoundsPicker";
 import StepCard from "./StepCard";
 import Steps from "./Steps";
 import UploadBox from "./UploadBox";
@@ -15,7 +18,7 @@ type Photo = { id: string; url: string; label: Label | null };
 
 const photoGrid = "grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-3";
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
+const labeledCount = (cats: number, nots: number) => Math.min(cats, nots);
 
 export default function CatLab() {
   const [step, setStep] = useState(1);
@@ -24,6 +27,10 @@ export default function CatLab() {
   const [skipped, setSkipped] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [rounds, setRounds] = useState<Rounds>(30);
+  const [training, setTraining] = useState(false);
+  const [trained, setTrained] = useState(false);
+  const [history, setHistory] = useState<number[]>([]); // accuracy after each round
 
   // Saved photos come from the server, with fresh 1-hour links.
   useEffect(() => {
@@ -40,6 +47,7 @@ export default function CatLab() {
 
   // Steps past `reached` stay locked; Next only shows once a step is done.
   function go(n: number) {
+    if (training) return; // don't leave the screen while the model is learning
     setStep(n);
     setReached((r) => Math.max(r, n));
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -48,6 +56,8 @@ export default function CatLab() {
   // Changing photos or labels means later steps must be done again.
   function changed() {
     setReached(step);
+    setTrained(false);
+    setHistory([]);
   }
 
   async function addFiles(files: File[]) {
@@ -98,6 +108,48 @@ export default function CatLab() {
         ps.map((p) => (p.id === id ? { ...p, label: before } : p)),
       );
       setError("Could not save that label. Try again.");
+    }
+  }
+
+  async function startTraining() {
+    setTraining(true);
+    setTrained(false);
+    setHistory([]);
+    setError("");
+    try {
+      // Ask the server for the labeled photos, with fresh 1-hour links.
+      const res = await fetch("/api/photos?ground=training");
+      if (!res.ok) throw new Error("Could not load your photos.");
+      const all: Photo[] = await res.json();
+      const labeled = all.filter(
+        (p): p is Photo & { label: Label } => p.label !== null && p.url !== "",
+      );
+      if (
+        !labeled.some((p) => p.label === "cat") ||
+        !labeled.some((p) => p.label === "not_cat")
+      ) {
+        throw new Error("Label at least 1 cat and 1 not cat first.");
+      }
+
+      // TensorFlow.js is big, so load it only when training starts.
+      const { train, MODEL_URL } = await import("../_lib/model");
+      const accuracy = await train(labeled, rounds, (_round, acc) =>
+        setHistory((h) => [...h, acc]),
+      );
+      setTrained(true);
+
+      const run = await fetch("/api/training-runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rounds, accuracy, modelUrl: MODEL_URL }),
+      });
+      if (!run.ok) {
+        setError("The model is saved, but this training run was not recorded.");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Training stopped.");
+    } finally {
+      setTraining(false);
     }
   }
 
@@ -190,7 +242,9 @@ export default function CatLab() {
         </div>
       </>
     );
-  } else {
+  } else if (step === 3) {
+    const started = training || trained || history.length > 0;
+    const lastAcc = history.at(-1);
     content = (
       <>
         <StepCard step={3} text="Train the model" />
@@ -198,18 +252,69 @@ export default function CatLab() {
           <Pill tone="cat">Cat: {cats}</Pill>
           <Pill tone="not">Not cat: {nots}</Pill>
         </div>
+        {!started && (
+          <RoundsPicker value={rounds} onChange={setRounds} disabled={training} />
+        )}
         <div className="flex justify-center">
-          <MainButton big locked>
-            Start training
-          </MainButton>
+          {training ? (
+            <MainButton big locked>
+              Training…
+            </MainButton>
+          ) : (
+            <MainButton big onClick={startTraining}>
+              {trained ? "Train again" : "Start training"}
+            </MainButton>
+          )}
         </div>
-        <HelpBox title="Not connected yet.">
-          The model has not been added to the app, so training cannot start.
-          Your {plural(photos.length, "labeled photo")} are ready for it.
+        {started && (
+          <>
+            <div className="text-center font-heading text-[44px] leading-tight font-semibold">
+              <div className="font-sans text-[15px] font-normal text-muted">
+                Round
+              </div>
+              {history.length} / {rounds}
+            </div>
+            <ProgressBar
+              value={Math.round((history.length / rounds) * 100)}
+              label="Training progress"
+            />
+            <AccuracyChart values={history} rounds={rounds} />
+          </>
+        )}
+        {trained && lastAcc !== undefined && (
+          <p className="text-center">
+            Done. The model is right on <b>{Math.round(lastAcc * 100)}%</b> of
+            your photos. It is saved in this browser.
+          </p>
+        )}
+        {error && <p className="text-[15px] text-red">{error}</p>}
+        <HelpBox title="What is happening?">
+          After each round the model checks its guesses against your labels and
+          fixes itself a little.
+          {labeledCount(cats, nots) < 10 &&
+            ` You have ${plural(cats + nots, "labeled photo")}. 10 or more of each group works best.`}
         </HelpBox>
         <div className="flex flex-wrap justify-between gap-3">
-          <BackButton onClick={() => go(2)} />
-          <MainButton locked>Finish training to continue</MainButton>
+          <BackButton onClick={() => go(2)} disabled={training} />
+          {trained ? (
+            <MainButton onClick={() => go(4)}>Next: Test the model</MainButton>
+          ) : (
+            <MainButton locked>
+              {training ? "Training…" : "Finish training to continue"}
+            </MainButton>
+          )}
+        </div>
+      </>
+    );
+  } else {
+    content = (
+      <>
+        <StepCard step={4} text="Test with new photos" />
+        <HelpBox title="Not built yet.">
+          Your model is trained and saved in this browser. Testing comes next.
+        </HelpBox>
+        <div className="flex flex-wrap justify-between gap-3">
+          <BackButton onClick={() => go(3)} />
         </div>
       </>
     );

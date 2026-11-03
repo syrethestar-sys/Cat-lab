@@ -30,10 +30,10 @@ The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 
 - Screen 1 (Upload) is done and verified: `/api/photos` (GET, POST) and `/api/photos/[id]` (DELETE) store files in Storage and rows in Postgres; photos survive a reload.
 - Screen 2 (Label) is done and verified: `PATCH /api/photos/[id]` saves `cat` / `not_cat`; labels survive a reload; a failed save undoes the click and shows an error.
-- Screen 3 shows a locked "Start training" button. There is no model yet.
-- Screen 4 is not built.
+- Screen 3 (Train) is done and verified: pick 10/30/50 rounds (default 30), TensorFlow.js trains in the browser, the model is saved to IndexedDB `cat-lab-model`, and `POST /api/training-runs` records the run. Training code is `app/_lib/model.ts` (browser only).
+- Screen 4 (Test) is a placeholder: "Not built yet".
 - GUIDE.md Step 0 is done: packages, `.env.local` (incl. `SUPABASE_SERVICE_ROLE_KEY`), private `photos` bucket, `certs/supabase-ca.crt`, tables `photos` and `training_runs` migrated, helpers `app/_lib/db.ts` and `app/_lib/storage.ts` (verified: the server reads the database and Storage).
-- Next: GUIDE.md Step 3 (train, save the model to IndexedDB, `POST /api/training-runs`).
+- Next: GUIDE.md Step 4 (load the model from IndexedDB, upload a test photo with `ground = testing`, guess, show the answer).
 - Run Prisma with `--config prisma.config.ts` unless the extra `prisma7.config.ts` is gone.
 
 ## Code
@@ -44,3 +44,7 @@ The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 - Colors and fonts are tokens in `app/globals.css` (`bg-page`, `text-muted`, `border-cat`, `text-green`, ...). Use these tokens, not new hex values.
 - Show no example or placeholder data in the app. Show only what the user really added.
 - Check types with `npx tsc --noEmit`.
+
+## Security
+
+- Row level security is ON for `photos` and `training_runs` (migration `enable_rls`, no policies). The Supabase anon key can't read or write them; only the server (Prisma, secret key) can. Keep RLS on for any new table.
