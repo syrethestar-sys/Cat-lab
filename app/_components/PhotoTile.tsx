@@ -1,6 +1,6 @@
 import { X } from "lucide-react";
 
-export type Label = "cat" | "not";
+export type Label = "cat" | "not_cat";
 
 type PhotoTileProps = {
   src: string;
@@ -18,7 +18,7 @@ export default function PhotoTile({
   const border =
     label === "cat"
       ? "border-cat"
-      : label === "not"
+      : label === "not_cat"
         ? "border-green"
         : "border-line";
 
@@ -49,9 +49,9 @@ export default function PhotoTile({
           </button>
           <button
             type="button"
-            aria-pressed={label === "not"}
-            onClick={() => onLabel("not")}
-            className={`cursor-pointer border-t-2 border-l-2 border-line px-1 py-2.5 ${label === "not" ? "bg-green-soft text-green" : "text-muted"}`}
+            aria-pressed={label === "not_cat"}
+            onClick={() => onLabel("not_cat")}
+            className={`cursor-pointer border-t-2 border-l-2 border-line px-1 py-2.5 ${label === "not_cat" ? "bg-green-soft text-green" : "text-muted"}`}
           >
             Not cat
           </button>

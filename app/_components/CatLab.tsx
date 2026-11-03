@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import BackButton from "./BackButton";
 import Card from "./Card";
 import HelpBox from "./HelpBox";
@@ -11,21 +11,31 @@ import StepCard from "./StepCard";
 import Steps from "./Steps";
 import UploadBox from "./UploadBox";
 
-type Photo = { id: number; url: string; label: Label | null };
+type Photo = { id: string; url: string; label: Label | null };
 
 const photoGrid = "grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-3";
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-let nextId = 1;
 
 export default function CatLab() {
   const [step, setStep] = useState(1);
   const [reached, setReached] = useState(1);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [skipped, setSkipped] = useState(0);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  // Saved photos come from the server, with fresh 1-hour links.
+  useEffect(() => {
+    fetch("/api/photos?ground=training")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then(setPhotos)
+      .catch(() => setError("Could not load your photos. Reload to try again."))
+      .finally(() => setLoading(false));
+  }, []);
 
   const cats = photos.filter((p) => p.label === "cat").length;
-  const nots = photos.filter((p) => p.label === "not").length;
+  const nots = photos.filter((p) => p.label === "not_cat").length;
   const left = photos.length - cats - nots;
 
   // Steps past `reached` stay locked; Next only shows once a step is done.
@@ -40,30 +50,37 @@ export default function CatLab() {
     setReached(step);
   }
 
-  function addFiles(files: File[]) {
+  async function addFiles(files: File[]) {
     const images = files.filter((f) => f.type.startsWith("image/"));
     setSkipped(files.length - images.length);
-    setPhotos((ps) => [
-      ...ps,
-      ...images.map((f) => ({
-        id: nextId++,
-        url: URL.createObjectURL(f),
-        label: null,
-      })),
-    ]);
+    setError("");
+    for (const file of images) {
+      const body = new FormData();
+      body.append("file", file);
+      body.append("ground", "training");
+      const res = await fetch("/api/photos", { method: "POST", body });
+      if (!res.ok) {
+        const msg = (await res.json().catch(() => null))?.error;
+        setError(msg ?? "Could not upload that photo.");
+        continue;
+      }
+      const photo: Photo = await res.json();
+      setPhotos((ps) => [...ps, photo]);
+    }
     changed();
   }
 
-  function removePhoto(id: number) {
-    setPhotos((ps) => {
-      const p = ps.find((x) => x.id === id);
-      if (p) URL.revokeObjectURL(p.url);
-      return ps.filter((x) => x.id !== id);
-    });
+  async function removePhoto(id: string) {
+    const res = await fetch(`/api/photos/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      setError("Could not remove that photo.");
+      return;
+    }
+    setPhotos((ps) => ps.filter((p) => p.id !== id));
     changed();
   }
 
-  function setLabel(id: number, label: Label) {
+  function setLabel(id: string, label: Label) {
     setPhotos((ps) => ps.map((p) => (p.id === id ? { ...p, label } : p)));
     changed();
   }
@@ -80,6 +97,8 @@ export default function CatLab() {
           text="You can pick many photos at once, or drop them here"
           onFiles={addFiles}
         />
+        {error && <p className="text-[15px] text-red">{error}</p>}
+        {loading && <p className="text-muted">Loading your photos…</p>}
         {skipped > 0 && (
           <p className="text-[15px] text-red">
             {plural(skipped, "file")} skipped. Only image files can be added.
