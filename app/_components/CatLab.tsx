@@ -8,12 +8,14 @@ import Card from "./Card";
 import GuessPanel from "./GuessPanel";
 import HelpBox from "./HelpBox";
 import MainButton from "./MainButton";
+import ModeToggle, { type TrainMode } from "./ModeToggle";
 import PhotoTile, { type Label } from "./PhotoTile";
 import Pill from "./Pill";
 import ProgressBar from "./ProgressBar";
 import RoundsPicker, { type Rounds } from "./RoundsPicker";
 import StepCard from "./StepCard";
 import Steps from "./Steps";
+import TrainingProcess, { emptyProcess, type ProcessState } from "./TrainingProcess";
 import UploadBox from "./UploadBox";
 import { hasSavedModel } from "../_lib/saved-model";
 
@@ -22,6 +24,7 @@ type Guess = { url: string; guess: "cat" | "not_cat"; sure: number };
 
 const photoGrid = "grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-3";
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const MODE_KEY = "cat-lab-train-mode"; // remembers Start fresh / Keep learning in this browser
 const labeledCount = (cats: number, nots: number) => Math.min(cats, nots);
 
 export default function CatLab() {
@@ -30,40 +33,52 @@ export default function CatLab() {
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [skipped, setSkipped] = useState(0);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [clearing, setClearing] = useState(false);
   const [rounds, setRounds] = useState<Rounds>(30);
   const [training, setTraining] = useState(false);
+  const [runRounds, setRunRounds] = useState<number>(30); // rounds of the run on screen
   const [trained, setTrained] = useState(false);
   const [history, setHistory] = useState<number[]>([]); // accuracy after each round
+  const [process, setProcess] = useState<ProcessState>(emptyProcess);
+  const [mode, setMode] = useState<TrainMode>("fresh");
+  const [hasModel, setHasModel] = useState(false); // a trained model is saved in this browser
+  const [report, setReport] = useState<{
+    train: number;
+    val: number | null;
+    heldOut: number;
+    continued: boolean;
+  } | null>(null);
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "missing">("idle");
   const [guess, setGuess] = useState<Guess | null>(null);
   const [guessing, setGuessing] = useState(false);
   const modelRef = useRef<LayersModel | null>(null);
 
-  // Saved photos come from the server, with fresh 1-hour links.
-  useEffect(() => {
-    fetch("/api/photos?ground=training")
-      .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .then(setPhotos)
-      .catch(() => setError("Could not load your photos. Reload to try again."))
-      .finally(() => setLoading(false));
-  }, []);
-
-  // "Remove all" needs a second click. If you don't, it goes back to normal.
-  useEffect(() => {
-    if (!confirmClear) return;
-    const timer = setTimeout(() => setConfirmClear(false), 5000);
-    return () => clearTimeout(timer);
-  }, [confirmClear]);
+  // Every visit starts empty: saved photos stay in Supabase but are not loaded here.
+  // Only photos added in this visit are shown, labeled and trained on.
 
   // A model saved in this browser earlier unlocks Step 4, so you can test without training again.
   useEffect(() => {
     hasSavedModel().then((saved) => {
+      setHasModel(saved);
       if (saved) setReached((r) => Math.max(r, 4));
     });
+    try {
+      if (localStorage.getItem(MODE_KEY) === "keep") setMode("keep");
+    } catch {
+      // storage blocked: stay on Start fresh
+    }
   }, []);
+
+  function pickMode(m: TrainMode) {
+    setMode(m);
+    try {
+      localStorage.setItem(MODE_KEY, m);
+    } catch {
+      // storage blocked: the choice lasts until reload
+    }
+  }
+
+  // Keep learning only works when there is a saved model to start from.
+  const keepLearning = hasModel && mode === "keep";
 
   // Load the saved model from IndexedDB when Step 4 opens.
   useEffect(() => {
@@ -102,6 +117,7 @@ export default function CatLab() {
     setReached(step);
     setTrained(false);
     setHistory([]);
+    setReport(null);
   }
 
   async function addFiles(files: File[]) {
@@ -134,24 +150,12 @@ export default function CatLab() {
     changed();
   }
 
-  async function removeAll() {
-    if (!confirmClear) {
-      setConfirmClear(true);
-      return;
-    }
-    setConfirmClear(false);
-    setClearing(true);
+  // Only empties the screen. The photos stay saved in Supabase.
+  function clearPreviews() {
+    setPhotos([]);
+    setSkipped(0);
     setError("");
-    try {
-      const res = await fetch("/api/photos?ground=training", { method: "DELETE" });
-      if (!res.ok) throw new Error();
-      setPhotos([]);
-      changed();
-    } catch {
-      setError("Could not remove all photos. Reload to see what is left.");
-    } finally {
-      setClearing(false);
-    }
+    changed();
   }
 
   // Update the screen first so it feels instant, then save. Undo if saving fails.
@@ -179,6 +183,10 @@ export default function CatLab() {
     setTraining(true);
     setTrained(false);
     setHistory([]);
+    setReport(null);
+    setProcess(emptyProcess());
+    const continued = keepLearning;
+    setRunRounds(rounds);
     setError("");
     setGuess(null);
     // The old model is about to be replaced, so forget it.
@@ -190,8 +198,11 @@ export default function CatLab() {
       const res = await fetch("/api/photos?ground=training");
       if (!res.ok) throw new Error("Could not load your photos.");
       const all: Photo[] = await res.json();
+      // Train only on the photos shown on this page, even if more are saved.
+      const shown = new Set(photos.map((p) => p.id));
       const labeled = all.filter(
-        (p): p is Photo & { label: Label } => p.label !== null && p.url !== "",
+        (p): p is Photo & { label: Label } =>
+          shown.has(p.id) && p.label !== null && p.url !== "",
       );
       if (
         !labeled.some((p) => p.label === "cat") ||
@@ -200,17 +211,39 @@ export default function CatLab() {
         throw new Error("Label at least 1 cat and 1 not cat first.");
       }
 
-      // TensorFlow.js is big, so load it only when training starts.
+      // TensorFlow.js and MobileNet are big, so load them only when training starts.
       const { train, MODEL_URL } = await import("../_lib/model");
-      const accuracy = await train(labeled, rounds, (_round, acc) =>
-        setHistory((h) => [...h, acc]),
-      );
+      const result = await train(labeled, rounds, continued, (e) => {
+        if (e.stage === "round") setHistory((h) => [...h, e.accuracy]);
+        setProcess((p) => {
+          const next = { ...p, stage: e.stage };
+          if (e.stage === "load") next.load = { done: e.done, total: e.total };
+          if (e.stage === "shrink") next.shrink = { done: e.done, total: e.total };
+          if (e.stage === "numbers") {
+            next.numbers = { done: e.done, total: e.total };
+            next.photo = e.photo;
+          }
+          if (e.stage === "split") next.split = { train: e.train, heldOut: e.heldOut };
+          if (e.stage === "round") next.round = { round: e.round, accuracy: e.accuracy };
+          return next;
+        });
+      });
+      setProcess((p) => ({ ...p, finished: true }));
+      setReport({
+        train: result.accuracy,
+        val: result.valAccuracy,
+        heldOut: result.heldOut,
+        continued,
+      });
       setTrained(true);
+      setHasModel(true);
+      // Record the honest number: accuracy on photos the model never saw, when there are some.
+      const accuracy = result.valAccuracy ?? result.accuracy;
 
       const run = await fetch("/api/training-runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rounds, accuracy, modelUrl: MODEL_URL }),
+        body: JSON.stringify({ rounds, accuracy, modelUrl: MODEL_URL, continued }),
       });
       if (!run.ok) {
         setError("The model is saved, but this training run was not recorded.");
@@ -245,7 +278,7 @@ export default function CatLab() {
       const photo: Photo = await res.json();
 
       const { loadPixels, predict } = await import("../_lib/model");
-      const result = predict(model, await loadPixels(photo.url));
+      const result = await predict(model, await loadPixels(photo.url));
       setGuess({ url: photo.url, ...result });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not test that photo.");
@@ -267,7 +300,6 @@ export default function CatLab() {
           onFiles={addFiles}
         />
         {error && <p className="text-[15px] text-red">{error}</p>}
-        {loading && <p className="text-muted">Loading your photos…</p>}
         {skipped > 0 && (
           <p className="text-[15px] text-red">
             {plural(skipped, "file")} skipped. Only image files can be added.
@@ -279,19 +311,11 @@ export default function CatLab() {
               <Pill tone="open">{plural(photos.length, "photo")} added</Pill>
               <button
                 type="button"
-                onClick={removeAll}
-                disabled={clearing}
-                className={`rounded-full border-2 px-3.5 py-1 text-[15px] font-bold focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-blue ${
-                  confirmClear
-                    ? "border-red bg-red text-white"
-                    : "border-line text-red hover:border-red"
-                } ${clearing ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+                onClick={clearPreviews}
+                title="Hides the photos on this page. They stay saved in Supabase."
+                className="cursor-pointer rounded-full border-2 border-line px-3.5 py-1 text-[15px] font-bold text-muted hover:border-blue hover:text-blue focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-blue"
               >
-                {clearing
-                  ? "Removing…"
-                  : confirmClear
-                    ? `Click again to remove all ${photos.length}`
-                    : "Remove all"}
+                Clear previews
               </button>
             </div>
             <div className={photoGrid}>
@@ -361,7 +385,7 @@ export default function CatLab() {
     );
   } else if (step === 3) {
     const started = training || trained || history.length > 0;
-    const lastAcc = history.at(-1);
+    const learning = history.length > 0;
     content = (
       <>
         <StepCard step={3} text="Train the model" />
@@ -369,8 +393,11 @@ export default function CatLab() {
           <Pill tone="cat">Cat: {cats}</Pill>
           <Pill tone="not">Not cat: {nots}</Pill>
         </div>
-        {!started && (
-          <RoundsPicker value={rounds} onChange={setRounds} disabled={training} />
+        {!training && (
+          <div className="flex flex-wrap justify-center gap-x-10 gap-y-4">
+            {hasModel && <ModeToggle value={mode} onChange={pickMode} />}
+            <RoundsPicker value={rounds} onChange={setRounds} />
+          </div>
         )}
         <div className="flex justify-center">
           {training ? (
@@ -385,29 +412,54 @@ export default function CatLab() {
         </div>
         {started && (
           <>
-            <div className="text-center font-heading text-[44px] leading-tight font-semibold">
-              <div className="font-sans text-[15px] font-normal text-muted">
-                Round
+            <TrainingProcess
+              state={process}
+              rounds={runRounds}
+              keepLearning={report?.continued ?? keepLearning}
+            />
+            {training && process.stage === null && (
+              <p className="text-center text-muted">Loading MobileNet…</p>
+            )}
+            {learning && (
+              <div className="text-center font-heading text-[44px] leading-tight font-semibold">
+                <div className="font-sans text-[15px] font-normal text-muted">
+                  Round
+                </div>
+                {history.length} / {runRounds}
               </div>
-              {history.length} / {rounds}
-            </div>
+            )}
             <ProgressBar
-              value={Math.round((history.length / rounds) * 100)}
+              value={Math.round((history.length / runRounds) * 100)}
               label="Training progress"
             />
-            <AccuracyChart values={history} rounds={rounds} />
+            <AccuracyChart values={history} rounds={runRounds} />
           </>
         )}
-        {trained && lastAcc !== undefined && (
-          <p className="text-center">
-            Done. The model is right on <b>{Math.round(lastAcc * 100)}%</b> of
-            your photos. It is saved in this browser.
-          </p>
+        {trained && report && (
+          <div className="grid gap-1 text-center">
+            <p>
+              Done. The model is right on <b>{Math.round(report.train * 100)}%</b>{" "}
+              of the photos it trained on.
+            </p>
+            {report.val !== null && (
+              <p>
+                On {plural(report.heldOut, "photo")} it never saw, it is right on{" "}
+                <b>{Math.round(report.val * 100)}%</b>. That is the number to trust.
+              </p>
+            )}
+            <p className="text-[15px] text-muted">
+              {report.continued
+                ? `It kept what it learned before, practiced ${plural(runRounds, "more round")}, and is saved in this browser.`
+                : "It is saved in this browser."}
+            </p>
+          </div>
         )}
         {error && <p className="text-[15px] text-red">{error}</p>}
         <HelpBox title="What is happening?">
-          After each round the model checks its guesses against your labels and
-          fixes itself a little.
+          The model starts from MobileNet, which already knows what millions of
+          photos look like. MobileNet turns each of your photos into numbers, and
+          each round the model checks its guesses against your labels and fixes
+          itself a little. About 1 in 5 photos is kept aside to test it fairly.
           {labeledCount(cats, nots) < 10 &&
             ` You have ${plural(cats + nots, "labeled photo")}. 10 or more of each group works best.`}
         </HelpBox>

@@ -22,6 +22,7 @@ model TrainingRun {
   rounds    Int // how many rounds the model learned
   accuracy  Float // 0 to 1, after the last round
   modelUrl  String // "indexeddb://cat-lab-model"
+  continued Boolean  @default(false) // true = kept learning from the saved model
   createdAt DateTime @default(now())
 
   @@map("training_runs")

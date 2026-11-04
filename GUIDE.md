@@ -377,89 +377,48 @@ Start training → GET labeled photos → Photos + links
 
 Show three small buttons above Start training: **10**, **30** and **50** rounds. Keep `30` selected at first. More rounds usually score better but take longer.
 
-### The model code
+### The model code (transfer learning with MobileNet)
 
-Create **`app/_lib/model.ts`**. Only this file imports TensorFlow.js, and only Client Components import this file.
+A small model trained from scratch on a few hundred photos only reached about 66% to 75%. So the app starts from **MobileNet**, a model Google trained on millions of photos. It already knows what cats, dogs and objects look like.
+
+1. MobileNet turns every photo into 1,280 numbers that describe it. We do not train MobileNet.
+2. We train a small classifier on those numbers: "cat" or "not cat". That is fast.
+3. Only the small classifier is saved to IndexedDB. MobileNet is downloaded again when needed (the browser caches it).
+4. 20% of the photos are kept aside during training, so the app can show accuracy on photos the model never saw. That is the number to trust.
+
+Install the package:
+
+```bash
+npm install @tensorflow-models/mobilenet@2.1.1
+```
+
+The code is in **`app/_lib/model.ts`**. Only this file imports TensorFlow.js and MobileNet, and only Client Components import it (with a dynamic `import()`). Its main pieces:
 
 ```ts
 import * as tf from "@tensorflow/tfjs";
+import * as mobilenet from "@tensorflow-models/mobilenet";
 
-export const SIZE = 64; // photos are shrunk to 64 × 64 pixels
+export const SIZE = 224; // MobileNet looks at 224 × 224 photos
 export const MODEL_URL = "indexeddb://cat-lab-model";
 
-// Load a photo link into a 64 × 64 canvas, cropped to a square.
-export function loadPixels(url: string): Promise<HTMLCanvasElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous"; // needed to read the pixels
-    img.onload = () => {
-      const c = document.createElement("canvas");
-      c.width = c.height = SIZE;
-      const s = Math.min(img.naturalWidth, img.naturalHeight);
-      c.getContext("2d")!.drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, SIZE, SIZE);
-      resolve(c);
-    };
-    img.onerror = () => reject(new Error("Could not load a photo"));
-    img.src = url;
-  });
-}
+// Load MobileNet once and reuse it.
+const base = await mobilenet.load({ version: 2, alpha: 1.0 });
 
-function toTensor(c: HTMLCanvasElement, flip = false) {
-  const t = tf.browser.fromPixels(c).toFloat().div(255);
-  return flip ? tf.reverse(t, 1) : t;
-}
+// A photo becomes 1,280 numbers.
+const numbers = base.infer(canvas, true);
 
-function buildModel() {
-  const m = tf.sequential();
-  m.add(tf.layers.conv2d({ inputShape: [SIZE, SIZE, 3], filters: 8, kernelSize: 3, activation: "relu", padding: "same" }));
-  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-  m.add(tf.layers.conv2d({ filters: 16, kernelSize: 3, activation: "relu", padding: "same" }));
-  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-  m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, activation: "relu", padding: "same" }));
-  m.add(tf.layers.globalAveragePooling2d({}));
-  m.add(tf.layers.dense({ units: 32, activation: "relu" }));
-  m.add(tf.layers.dropout({ rate: 0.3 }));
-  m.add(tf.layers.dense({ units: 1, activation: "sigmoid" })); // near 1 = cat, near 0 = not cat
-  m.compile({ optimizer: tf.train.adam(0.003), loss: "binaryCrossentropy", metrics: ["accuracy"] });
-  return m;
-}
+// The small classifier that learns from those numbers.
+const head = tf.sequential();
+head.add(tf.layers.dense({ inputShape: [1280], units: 64, activation: "relu", kernelRegularizer: tf.regularizers.l2({ l2: 0.01 }) }));
+head.add(tf.layers.dropout({ rate: 0.4 }));
+head.add(tf.layers.dense({ units: 1, activation: "sigmoid" })); // near 1 = cat
 
-// One round = one full pass over the photos. Reports after every round.
-export async function train(
-  photos: { url: string; label: "cat" | "not_cat" }[],
-  rounds: number,
-  onRound: (round: number, accuracy: number) => void,
-) {
-  const canvases = await Promise.all(photos.map((p) => loadPixels(p.url)));
-  // Every photo is used twice: as is and mirrored. More examples from the same photos.
-  const xs = tf.tidy(() => tf.stack([...canvases.map((c) => toTensor(c)), ...canvases.map((c) => toTensor(c, true))]));
-  const labels = photos.map((p) => (p.label === "cat" ? 1 : 0));
-  const ys = tf.tensor2d([...labels, ...labels], [labels.length * 2, 1]);
-
-  const model = buildModel();
-  let accuracy = 0;
-  try {
-    await model.fit(xs, ys, {
-      epochs: rounds,
-      batchSize: 16,
-      shuffle: true,
-      callbacks: {
-        onEpochEnd: async (epoch, logs) => {
-          accuracy = Number(logs?.acc ?? logs?.accuracy ?? 0);
-          onRound(epoch + 1, accuracy);
-          await tf.nextFrame(); // let the screen update
-        },
-      },
-    });
-    await model.save(MODEL_URL); // the model now lives in IndexedDB
-  } finally {
-    xs.dispose();
-    ys.dispose();
-    model.dispose(); // free memory; Step 4 loads the model back from IndexedDB
-  }
-  return accuracy;
-}
+// One round = one pass over the training photos. Each photo is also used mirrored.
+await head.fit(xs, ys, { epochs: rounds, batchSize: 16, shuffle: true, validationData: [vxs, vys], callbacks: { onEpochEnd } });
+await head.save(MODEL_URL);
 ```
+
+`train()` returns `{ accuracy, valAccuracy, heldOut }`. The app records `valAccuracy` (accuracy on photos the model never saw) in `training_runs`. `loadModel()` rejects an older saved model (the previous version trained from scratch) and asks you to train again.
 
 ### The run record
 
@@ -490,7 +449,8 @@ async function startTraining() {
     const labeled = all.filter((p): p is Photo & { label: Label } => p.label !== null);
 
     const { train, MODEL_URL } = await import("../_lib/model"); // load TensorFlow.js only now
-    const accuracy = await train(labeled, rounds, (_round, acc) => setHistory((h) => [...h, acc]));
+    const result = await train(labeled, rounds, (_round, acc) => setHistory((h) => [...h, acc]), (done, total) => setPrepare({ done, total }));
+    const accuracy = result.valAccuracy ?? result.accuracy;
 
     await fetch("/api/training-runs", {
       method: "POST",

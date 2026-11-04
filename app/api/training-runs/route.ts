@@ -1,7 +1,7 @@
 import { db } from "@/app/_lib/db";
 
 export async function POST(request: Request) {
-  const { rounds, accuracy, modelUrl } = await request.json().catch(() => ({}));
+  const { rounds, accuracy, modelUrl, continued = false } = await request.json().catch(() => ({}));
 
   if (!Number.isInteger(rounds) || rounds < 1) {
     return Response.json(
@@ -19,8 +19,15 @@ export async function POST(request: Request) {
     return Response.json({ error: "modelUrl is required" }, { status: 400 });
   }
 
+  if (typeof continued !== "boolean") {
+    return Response.json(
+      { error: "continued must be true or false" },
+      { status: 400 },
+    );
+  }
+
   const run = await db.trainingRun.create({
-    data: { rounds, accuracy, modelUrl },
+    data: { rounds, accuracy, modelUrl, continued },
   });
   return Response.json(run, { status: 201 });
 }

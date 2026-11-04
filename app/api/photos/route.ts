@@ -82,29 +82,3 @@ export async function POST(request: Request) {
     { status: 201 },
   );
 }
-
-// Remove every photo in one ground: the files in Storage first, then their rows.
-export async function DELETE(request: Request) {
-  const ground = new URL(request.url).searchParams.get("ground") ?? "training";
-  if (!GROUNDS.includes(ground)) {
-    return Response.json({ error: "Unknown ground" }, { status: 400 });
-  }
-
-  const rows = await db.photo.findMany({
-    where: { ground },
-    select: { id: true, storagePath: true },
-  });
-
-  let removed = 0;
-  for (let i = 0; i < rows.length; i += 100) {
-    const chunk = rows.slice(i, i + 100);
-    const { error } = await storage.remove(chunk.map((r) => r.storagePath));
-    if (error) {
-      return Response.json({ error: error.message, removed }, { status: 502 });
-    }
-    // Delete a chunk's rows only after its files are gone, so no row points at a missing file.
-    await db.photo.deleteMany({ where: { id: { in: chunk.map((r) => r.id) } } });
-    removed += chunk.length;
-  }
-  return Response.json({ removed });
-}

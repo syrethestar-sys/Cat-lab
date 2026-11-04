@@ -22,15 +22,17 @@ Photos and labels go **through our API routes**. The browser never talks to Supa
 3. Train → TensorFlow.js in the browser (10, 30 or 50 rounds, default 30) → model to `indexeddb://cat-lab-model` → `POST /api/training-runs`
 4. Test → load the model from IndexedDB → upload a photo with `ground = testing` → guess → "Cat, 87% sure"
 
-Tables: `photos` (id, storagePath, label, ground, createdAt) and `training_runs` (id, rounds, accuracy, modelUrl, createdAt).
+Tables: `photos` (id, storagePath, label, ground, createdAt) and `training_runs` (id, rounds, accuracy, modelUrl, continued, createdAt).
 
 The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 
 ## Current state
 
-- Screen 1 (Upload) is done and verified: `/api/photos` (GET, POST) and `/api/photos/[id]` (DELETE) store files in Storage and rows in Postgres; photos survive a reload. A "Remove all" button (two clicks to confirm) calls `DELETE /api/photos?ground=training`, which deletes the files and rows for that ground.
-- Screen 2 (Label) is done and verified: `PATCH /api/photos/[id]` saves `cat` / `not_cat`; labels survive a reload; a failed save undoes the click and shows an error.
-- Screen 3 (Train) is done and verified: pick 10/30/50 rounds (default 30), TensorFlow.js trains in the browser, the model is saved to IndexedDB `cat-lab-model`, and `POST /api/training-runs` records the run. Training code is `app/_lib/model.ts` (browser only).
+- Screen 1 (Upload) is done and verified: `/api/photos` (GET, POST) and `/api/photos/[id]` (DELETE) store files in Storage and rows in Postgres. Every visit starts empty: the page does not load saved photos on refresh (they stay in Supabase). A "Clear previews" button only empties the page; the photos stay saved in Supabase. Training uses only the photos shown on the page. The × on a tile deletes that one photo from Supabase.
+- Screen 2 (Label) is done and verified: `PATCH /api/photos/[id]` saves `cat` / `not_cat` in the database; a failed save undoes the click and shows an error.
+- Screen 3 (Train) is done and verified: pick 10/30/50 rounds (default 30). The model uses **MobileNet v2 transfer learning**: MobileNet turns each photo into 1,280 numbers and a small classifier trains on them (20% of photos are held back to measure real accuracy). Only the small classifier is saved to IndexedDB `cat-lab-model`; MobileNet is fetched from tfhub.dev each session (needs internet). `POST /api/training-runs` records the held-out accuracy. Code is `app/_lib/model.ts` (browser only). A model saved by the old from-scratch version is rejected and needs retraining.
+- Screen 3 extras (verified): a **Start fresh / Keep learning** toggle (`app/_components/ModeToggle.tsx`) shows only when a model is saved in the browser; the choice is remembered in localStorage (`cat-lab-train-mode`). Keep learning loads the saved classifier, compiles it again and trains more; `training_runs.continued` records which mode ran. The held-back photos are fixed by a hash of the photo id (score < 0.2, at most 20% per group, groups under 5 hold none back), so "photos it never saw" stays honest across runs. A live process list (`app/_components/TrainingProcess.tsx`) shows the 6 stages in order with progress bars, and for each photo: the photo, its 224 × 224 version, the mirror copy and its 1,280 numbers as bars.
+- Measured with 200 photos (100 cat / 100 not cat): 100% on 40 held-out photos, and 9 of 10 on photos from outside the set (one Shiba Inu in snow was called a cat at 53%).
 - Screen 4 (Test) is done and verified: loads the model from IndexedDB, uploads one photo with `ground = testing` (never used for training), guesses, and shows e.g. "A cat, 100% sure". A model saved in the browser unlocks Step 4 after a reload (`app/_lib/saved-model.ts`).
 - GUIDE.md Step 0 is done: packages, `.env.local` (incl. `SUPABASE_SERVICE_ROLE_KEY`), private `photos` bucket, `certs/supabase-ca.crt`, tables `photos` and `training_runs` migrated, helpers `app/_lib/db.ts` and `app/_lib/storage.ts` (verified: the server reads the database and Storage).
 - All 4 screens are built. Remaining ideas: a test score on labeled test photos, real-photo accuracy checks, README.
