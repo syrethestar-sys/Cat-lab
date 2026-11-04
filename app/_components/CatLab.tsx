@@ -15,6 +15,7 @@ import ProgressBar from "./ProgressBar";
 import RoundsPicker, { type Rounds } from "./RoundsPicker";
 import StepCard from "./StepCard";
 import Steps from "./Steps";
+import TestSet, { type TestGuess, type TestPhoto } from "./TestSet";
 import TrainingProcess, { emptyProcess, type ProcessState } from "./TrainingProcess";
 import UploadBox from "./UploadBox";
 import { hasSavedModel } from "../_lib/saved-model";
@@ -51,6 +52,14 @@ export default function CatLab() {
   const [guess, setGuess] = useState<Guess | null>(null);
   const [guessing, setGuessing] = useState(false);
   const modelRef = useRef<LayersModel | null>(null);
+  // Step 4 test set: labeled photos the model never trains on, and its score on them.
+  const [testPhotos, setTestPhotos] = useState<TestPhoto[]>([]);
+  const [testResults, setTestResults] = useState<Record<string, TestGuess> | null>(null);
+  const [testScore, setTestScore] = useState<number | null>(null); // % right, latest check
+  const [lastScore, setLastScore] = useState<number | null>(null); // % right, check before
+  const [checking, setChecking] = useState<{ done: number; total: number } | null>(null);
+  const [testUploading, setTestUploading] = useState(false);
+  const [testError, setTestError] = useState("");
 
   // Every visit starts empty: saved photos stay in Supabase but are not loaded here.
   // Only photos added in this visit are shown, labeled and trained on.
@@ -185,6 +194,7 @@ export default function CatLab() {
     setHistory([]);
     setReport(null);
     setProcess(emptyProcess());
+    setTestResults(null); // a new model needs a new check
     const continued = keepLearning;
     setRunRounds(rounds);
     setError("");
@@ -284,6 +294,81 @@ export default function CatLab() {
       setError(e instanceof Error ? e.message : "Could not test that photo.");
     } finally {
       setGuessing(false);
+    }
+  }
+
+  // Test photos are saved with ground = "testing", so training never uses them.
+  async function addTestFiles(files: File[]) {
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    setTestError(images.length < files.length ? "Only image files can be added." : "");
+    setTestResults(null);
+    setTestUploading(true);
+    for (const file of images) {
+      const body = new FormData();
+      body.append("file", file);
+      body.append("ground", "testing");
+      const res = await fetch("/api/photos", { method: "POST", body }).catch(() => null);
+      if (!res?.ok) {
+        const msg = (await res?.json().catch(() => null))?.error;
+        setTestError(msg ?? "Could not upload that photo.");
+        continue;
+      }
+      const photo: TestPhoto = await res.json();
+      setTestPhotos((ps) => [...ps, { id: photo.id, url: photo.url, label: null }]);
+    }
+    setTestUploading(false);
+  }
+
+  // Same as Step 2: update the screen first, undo if saving fails.
+  async function labelTest(id: string, label: Label) {
+    const before = testPhotos.find((p) => p.id === id)?.label ?? null;
+    setTestError("");
+    setTestResults(null);
+    setTestPhotos((ps) => ps.map((p) => (p.id === id ? { ...p, label } : p)));
+    const res = await fetch(`/api/photos/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    }).catch(() => null);
+    if (!res?.ok) {
+      setTestPhotos((ps) => ps.map((p) => (p.id === id ? { ...p, label: before } : p)));
+      setTestError("Could not save that label. Try again.");
+    }
+  }
+
+  async function removeTest(id: string) {
+    const res = await fetch(`/api/photos/${id}`, { method: "DELETE" }).catch(() => null);
+    if (!res?.ok) {
+      setTestError("Could not remove that photo.");
+      return;
+    }
+    setTestResults(null);
+    setTestPhotos((ps) => ps.filter((p) => p.id !== id));
+  }
+
+  // The model guesses every labeled test photo; the score compares guesses with labels.
+  async function checkTests() {
+    const model = modelRef.current;
+    const labeled = testPhotos.filter((p) => p.label !== null);
+    if (!model || labeled.length === 0) return;
+    setTestError("");
+    setTestResults(null);
+    setChecking({ done: 0, total: labeled.length });
+    try {
+      const { predictMany } = await import("../_lib/model");
+      const guesses = await predictMany(model, labeled.map((p) => p.url), (done, total) =>
+        setChecking({ done, total }),
+      );
+      const results: Record<string, TestGuess> = {};
+      labeled.forEach((p, i) => (results[p.id] = guesses[i]));
+      const right = labeled.filter((p, i) => p.label === guesses[i].guess).length;
+      setLastScore(testScore);
+      setTestScore(Math.round((right / labeled.length) * 100));
+      setTestResults(results);
+    } catch (e) {
+      setTestError(e instanceof Error ? e.message : "Could not check the test photos.");
+    } finally {
+      setChecking(null);
     }
   }
 
@@ -502,6 +587,19 @@ export default function CatLab() {
             {guess && !guessing && (
               <GuessPanel src={guess.url} guess={guess.guess} sure={guess.sure} />
             )}
+            <TestSet
+              photos={testPhotos}
+              results={testResults}
+              lastScore={testResults ? lastScore : null}
+              checking={checking}
+              uploading={testUploading}
+              error={testError}
+              onAdd={addTestFiles}
+              onLabel={labelTest}
+              onRemove={removeTest}
+              onCheck={checkTests}
+              onEdit={() => setTestResults(null)}
+            />
           </>
         )}
         {error && <p className="text-[15px] text-red">{error}</p>}

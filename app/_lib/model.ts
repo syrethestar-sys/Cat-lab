@@ -298,3 +298,18 @@ export async function predict(head: tf.LayersModel, canvas: HTMLCanvasElement) {
     sure: Math.round((isCat ? p : 1 - p) * 100),
   };
 }
+
+// Guess many photos with one model, telling the screen after each photo.
+export async function predictMany(
+  head: tf.LayersModel,
+  urls: string[],
+  onProgress?: (done: number, total: number) => void,
+) {
+  const results: Awaited<ReturnType<typeof predict>>[] = [];
+  for (let i = 0; i < urls.length; i++) {
+    results.push(await predict(head, await loadPixels(urls[i])));
+    onProgress?.(i + 1, urls.length);
+    await tf.nextFrame(); // let the screen update
+  }
+  return results;
+}
