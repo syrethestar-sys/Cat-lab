@@ -24,6 +24,7 @@ model TrainingRun {
   accuracy  Float // 0 to 1, after the last round
   modelUrl  String // "indexeddb://cat-lab-model"
   continued Boolean  @default(false) // true = kept learning from the saved model
+  model     String   @default("baby") // "baby" = learned from zero; "mobilenet" = older runs
   createdAt DateTime @default(now())
 
   @@map("training_runs")

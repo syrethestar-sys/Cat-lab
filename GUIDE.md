@@ -82,7 +82,7 @@ model TrainingRun {
   id        String   @id @default(uuid())
   rounds    Int // how many rounds the model learned
   accuracy  Float // 0 to 1, after the last round
-  modelUrl  String // "indexeddb://cat-lab-model"
+  modelUrl  String // "indexeddb://cat-lab-baby"
   createdAt DateTime @default(now())
 
   @@map("training_runs")
@@ -377,48 +377,43 @@ Start training → GET labeled photos → Photos + links
 
 Show three small buttons above Start training: **10**, **30** and **50** rounds. Keep `30` selected at first. More rounds usually score better but take longer.
 
-### The model code (transfer learning with MobileNet)
+### The model code (a baby model, learned from zero)
 
-A small model trained from scratch on a few hundred photos only reached about 66% to 75%. So the app starts from **MobileNet**, a model Google trained on millions of photos. It already knows what cats, dogs and objects look like.
+The model starts as random numbers and learns everything from your photos. No model trained by someone else is used. This is the point of the class: you watch a model learn.
 
-1. MobileNet turns every photo into 1,280 numbers that describe it. We do not train MobileNet.
-2. We train a small classifier on those numbers: "cat" or "not cat". That is fast.
-3. Only the small classifier is saved to IndexedDB. MobileNet is downloaded again when needed (the browser caches it).
-4. 20% of the photos are kept aside during training, so the app can show accuracy on photos the model never saw. That is the number to trust.
+1. Each photo is shrunk to 64 × 64 pixels: 64 × 64 × 3 colors = 12,288 numbers from 0 to 1.
+2. Three "look" layers (`look1`, `look2`, `look3`) slide small pattern detectors (3 × 3 pixels) over the photo. The first finds edges and colors, later ones combine them.
+3. Each round it guesses every training photo, compares with your label, and nudges its numbers.
+4. 20% of the photos are kept aside, so the app shows accuracy on photos the model never saw. That is the number to trust.
 
-Install the package:
+Expect about 55% to 75% on photos it never saw with ~200 photos. On its own photos it climbs much higher: it starts to **memorize**. The app shows both lines and says so.
 
-```bash
-npm install @tensorflow-models/mobilenet@2.1.1
-```
-
-The code is in **`app/_lib/model.ts`**. Only this file imports TensorFlow.js and MobileNet, and only Client Components import it (with a dynamic `import()`). Its main pieces:
+The code is in **`app/_lib/model.ts`**. Only this file imports TensorFlow.js, and only Client Components import it (with a dynamic `import()`). Its main pieces:
 
 ```ts
 import * as tf from "@tensorflow/tfjs";
-import * as mobilenet from "@tensorflow-models/mobilenet";
 
-export const SIZE = 224; // MobileNet looks at 224 × 224 photos
-export const MODEL_URL = "indexeddb://cat-lab-model";
+export const SIZE = 64;
+export const MODEL_URL = "indexeddb://cat-lab-baby";
 
-// Load MobileNet once and reuse it.
-const base = await mobilenet.load({ version: 2, alpha: 1.0 });
-
-// A photo becomes 1,280 numbers.
-const numbers = base.infer(canvas, true);
-
-// The small classifier that learns from those numbers.
-const head = tf.sequential();
-head.add(tf.layers.dense({ inputShape: [1280], units: 64, activation: "relu", kernelRegularizer: tf.regularizers.l2({ l2: 0.01 }) }));
-head.add(tf.layers.dropout({ rate: 0.4 }));
-head.add(tf.layers.dense({ units: 1, activation: "sigmoid" })); // near 1 = cat
+const m = tf.sequential();
+[8, 16, 32].forEach((filters, i) => {
+  m.add(tf.layers.conv2d({ ...(i === 0 ? { inputShape: [SIZE, SIZE, 3] } : {}), name: `look${i + 1}`, filters, kernelSize: 3, padding: "same", activation: "relu" }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 })); // halve the size
+});
+m.add(tf.layers.flatten());
+m.add(tf.layers.dropout({ rate: 0.4 }));
+m.add(tf.layers.dense({ units: 32, activation: "relu" }));
+m.add(tf.layers.dropout({ rate: 0.4 }));
+m.add(tf.layers.dense({ units: 1, activation: "sigmoid" })); // near 1 = cat
+m.compile({ optimizer: tf.train.adam(0.001), loss: "binaryCrossentropy", metrics: ["accuracy"] });
 
 // One round = one pass over the training photos. Each photo is also used mirrored.
-await head.fit(xs, ys, { epochs: rounds, batchSize: 16, shuffle: true, validationData: [vxs, vys], callbacks: { onEpochEnd } });
-await head.save(MODEL_URL);
+await m.fit(xs, ys, { epochs: rounds, batchSize: 16, shuffle: true, validationData: [vxs, vys], callbacks: { onEpochEnd } });
+await m.save(MODEL_URL);
 ```
 
-`train()` returns `{ accuracy, valAccuracy, heldOut }`. The app records `valAccuracy` (accuracy on photos the model never saw) in `training_runs`. `loadModel()` rejects an older saved model (the previous version trained from scratch) and asks you to train again.
+After every round `train()` also reports what is inside the model: the 8 first-layer detectors as tiny 3 × 3 color pictures (and how much they changed), and what each look layer sees in one held-back photo. `train()` returns `{ accuracy, valAccuracy, heldOut }`. The app records `valAccuracy` and `model = "baby"` in `training_runs`. `loadModel()` rejects anything that is not a baby model.
 
 ### The run record
 
@@ -472,8 +467,8 @@ Show what the app already has: the **Round** counter `history.length / rounds`, 
 
 - [ ] Use at least 5 cats and 5 not cats. Pick 30 rounds and click Start training.
 - [ ] The round counter goes up to 30, the bar fills, and the accuracy line grows.
-- [ ] **Application → IndexedDB → tensorflowjs → models_store** has an entry `cat-lab-model`.
-- [ ] **Network** shows `POST /api/training-runs` with status **201**. Prisma Studio shows a `training_runs` row with `rounds = 30` and `modelUrl = indexeddb://cat-lab-model`.
+- [ ] **Application → IndexedDB → tensorflowjs → models_store** has an entry `cat-lab-baby`.
+- [ ] **Network** shows `POST /api/training-runs` with status **201**. Prisma Studio shows a `training_runs` row with `rounds = 30` and `modelUrl = indexeddb://cat-lab-baby` and `model = baby`.
 - [ ] **Console** has no errors. A "tainted canvas" error means a photo link was loaded without `crossOrigin = "anonymous"`.
 
 ---
@@ -486,7 +481,7 @@ Show what the app already has: the **Round** counter `history.length / rounds`, 
 Add test photo → Load model from IndexedDB → Guess photo (TensorFlow.js) → 0.92 = Cat → Show answer
 ```
 
-Loading from IndexedDB proves the model was really saved. After a reload, a saved model unlocks Step 4 on its own (a small check in `app/_lib/saved-model.ts` looks for the `cat-lab-model` entry without loading TensorFlow.js). It also means the Testing ground works after you reload the page, without training again.
+Loading from IndexedDB proves the model was really saved. After a reload, a saved model unlocks Step 4 on its own (a small check in `app/_lib/saved-model.ts` looks for the `cat-lab-baby` entry without loading TensorFlow.js). It also means the Testing ground works after you reload the page, without training again.
 
 ### Load the model and guess
 
@@ -542,7 +537,7 @@ Change **`GuessPanel`** to take `src: string` (the photo link) instead of `icon`
 - [ ] The screen shows "A cat" and a sure %. Upload a non-cat: it shows "Not a cat".
 - [ ] Supabase → Storage → `photos/testing/` has the new files. Training later ignores them.
 - [ ] Reload and go straight to Step 4 without training: the model still loads from IndexedDB.
-- [ ] Clear it (Application → IndexedDB → delete `cat-lab-model`), upload a photo: the app says to train first and does not crash.
+- [ ] Clear it (Application → IndexedDB → delete `cat-lab-baby`), upload a photo: the app says to train first and does not crash.
 - [ ] **Console** has no errors.
 
 ---

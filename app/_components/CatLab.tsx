@@ -40,6 +40,7 @@ export default function CatLab() {
   const [runRounds, setRunRounds] = useState<number>(30); // rounds of the run on screen
   const [trained, setTrained] = useState(false);
   const [history, setHistory] = useState<number[]>([]); // accuracy after each round
+  const [newHistory, setNewHistory] = useState<(number | null)[]>([]); // on photos it never saw
   const [process, setProcess] = useState<ProcessState>(emptyProcess);
   const [mode, setMode] = useState<TrainMode>("fresh");
   const [hasModel, setHasModel] = useState(false); // a trained model is saved in this browser
@@ -127,6 +128,7 @@ export default function CatLab() {
     setReached(step);
     setTrained(false);
     setHistory([]);
+    setNewHistory([]);
     setReport(null);
   }
 
@@ -196,6 +198,7 @@ export default function CatLab() {
     setTraining(true);
     setTrained(false);
     setHistory([]);
+    setNewHistory([]);
     setReport(null);
     setProcess(emptyProcess());
     setTestResults(null); // a new model needs a new check
@@ -225,20 +228,31 @@ export default function CatLab() {
         throw new Error("Label at least 1 cat and 1 not cat first.");
       }
 
-      // TensorFlow.js and MobileNet are big, so load them only when training starts.
+      // TensorFlow.js is big, so load it only when training starts.
       const { train, MODEL_URL } = await import("../_lib/model");
       const result = await train(labeled, rounds, continued, (e) => {
-        if (e.stage === "round") setHistory((h) => [...h, e.accuracy]);
+        if (e.stage === "round") {
+          setHistory((h) => [...h, e.accuracy]);
+          setNewHistory((h) => [...h, e.valAccuracy]);
+        }
         setProcess((p) => {
           const next = { ...p, stage: e.stage };
           if (e.stage === "load") next.load = { done: e.done, total: e.total };
           if (e.stage === "shrink") next.shrink = { done: e.done, total: e.total };
-          if (e.stage === "numbers") {
-            next.numbers = { done: e.done, total: e.total };
+          if (e.stage === "pixels") {
+            next.pixels = { done: e.done, total: e.total };
             next.photo = e.photo;
           }
           if (e.stage === "split") next.split = { train: e.train, heldOut: e.heldOut };
-          if (e.stage === "round") next.round = { round: e.round, accuracy: e.accuracy };
+          if (e.stage === "start") {
+            next.spy = e.spy;
+            next.before = e.inside;
+            next.inside = e.inside;
+          }
+          if (e.stage === "round") {
+            next.round = { round: e.round, accuracy: e.accuracy };
+            next.inside = e.inside;
+          }
           return next;
         });
       });
@@ -257,7 +271,7 @@ export default function CatLab() {
       const run = await fetch("/api/training-runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rounds, accuracy, modelUrl: MODEL_URL, continued }),
+        body: JSON.stringify({ rounds, accuracy, modelUrl: MODEL_URL, continued, model: "baby" }),
       });
       if (!run.ok) {
         setError("The model is saved, but this training run was not recorded.");
@@ -487,6 +501,10 @@ export default function CatLab() {
   } else if (step === 3) {
     const started = training || trained || history.length > 0;
     const learning = history.length > 0;
+    // Memorizing: after a few rounds, much better on its own photos than on new ones.
+    const lastNew = newHistory.at(-1);
+    const memorizing =
+      history.length >= 5 && lastNew != null && history.at(-1)! - lastNew >= 0.15;
     content = (
       <>
         <StepCard step={3} text="Train the model" />
@@ -519,7 +537,7 @@ export default function CatLab() {
               keepLearning={report?.continued ?? keepLearning}
             />
             {training && process.stage === null && (
-              <p className="text-center text-muted">Loading MobileNet…</p>
+              <p className="text-center text-muted">Getting ready…</p>
             )}
             {learning && (
               <div className="text-center font-heading text-[44px] leading-tight font-semibold">
@@ -533,7 +551,15 @@ export default function CatLab() {
               value={Math.round((history.length / runRounds) * 100)}
               label="Training progress"
             />
-            <AccuracyChart values={history} rounds={runRounds} />
+            <AccuracyChart values={history} newValues={newHistory} rounds={runRounds} />
+            {memorizing && (
+              <p className="rounded-xl bg-cat-soft px-4 py-3 text-center text-[15px]">
+                <b>It is starting to memorize.</b> It is right on{" "}
+                {Math.round(history.at(-1)! * 100)}% of the photos it learns from, but only{" "}
+                {Math.round(newHistory.at(-1)! * 100)}% of photos it never saw. It remembers
+                your photos instead of learning what a cat looks like. More photos help.
+              </p>
+            )}
           </>
         )}
         {trained && report && (
@@ -557,10 +583,10 @@ export default function CatLab() {
         )}
         {error && <p className="text-[15px] text-red">{error}</p>}
         <HelpBox title="What is happening?">
-          The model starts from MobileNet, which already knows what millions of
-          photos look like. MobileNet turns each of your photos into numbers, and
-          each round the model checks its guesses against your labels and fixes
-          itself a little. About 1 in 5 photos is kept aside to test it fairly.
+          The model starts from zero: random numbers that know nothing about cats.
+          It only sees the pixels of your photos. Each round it guesses every
+          photo, checks your label, and fixes itself a little. About 1 in 5 photos
+          is kept aside to test it fairly.
           {labeledCount(cats, nots) < 10 &&
             ` You have ${plural(cats + nots, "labeled photo")}. 10 or more of each group works best.`}
         </HelpBox>

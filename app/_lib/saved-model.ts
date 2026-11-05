@@ -1,3 +1,7 @@
+// Name of the model in IndexedDB. MobileNet-era models were "cat-lab-model"; a new name
+// means those are simply not found, instead of failing later.
+export const MODEL_NAME = "cat-lab-baby";
+
 // Light check (no TensorFlow.js) for "is there a trained model saved in this browser?".
 // TensorFlow.js keeps models in the IndexedDB database "tensorflowjs", store "models_store".
 export async function hasSavedModel(): Promise<boolean> {
@@ -21,7 +25,7 @@ export async function hasSavedModel(): Promise<boolean> {
         const get = db
           .transaction("models_store", "readonly")
           .objectStore("models_store")
-          .getKey("cat-lab-model");
+          .getKey(MODEL_NAME);
         get.onsuccess = () => {
           db.close();
           resolve(get.result !== undefined);

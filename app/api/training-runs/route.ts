@@ -1,7 +1,13 @@
 import { db } from "@/app/_lib/db";
 
 export async function POST(request: Request) {
-  const { rounds, accuracy, modelUrl, continued = false } = await request.json().catch(() => ({}));
+  const {
+    rounds,
+    accuracy,
+    modelUrl,
+    continued = false,
+    model = "baby",
+  } = await request.json().catch(() => ({}));
 
   if (!Number.isInteger(rounds) || rounds < 1) {
     return Response.json(
@@ -26,8 +32,13 @@ export async function POST(request: Request) {
     );
   }
 
+  // Only the baby model (learned from zero) is trained now. Older rows say "mobilenet".
+  if (model !== "baby") {
+    return Response.json({ error: 'model must be "baby"' }, { status: 400 });
+  }
+
   const run = await db.trainingRun.create({
-    data: { rounds, accuracy, modelUrl, continued },
+    data: { rounds, accuracy, modelUrl, continued, model },
   });
   return Response.json(run, { status: 201 });
 }
