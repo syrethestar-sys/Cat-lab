@@ -51,6 +51,7 @@ export default function CatLab() {
     val: number | null;
     heldOut: number;
     continued: boolean;
+    temperature: number | null; // how much its "sure" was changed after training
   } | null>(null);
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "missing">("idle");
   const [guess, setGuess] = useState<Guess | null>(null);
@@ -277,6 +278,7 @@ export default function CatLab() {
         val: result.valAccuracy,
         heldOut: result.heldOut,
         continued,
+        temperature: result.temperature,
       });
       setTrained(true);
       setHasModel(true);
@@ -602,6 +604,13 @@ export default function CatLab() {
               <p>
                 On {plural(report.heldOut, "photo")} it never saw, it is right on{" "}
                 <b>{Math.round(report.val * 100)}%</b>. That is the number to trust.
+              </p>
+            )}
+            {report.temperature !== null && (
+              <p className="text-[15px] text-muted">
+                {report.temperature > 1
+                  ? `It sounded too sure of itself, so its "sure" numbers are softened (divided by ${report.temperature.toFixed(1)}). Now "90% sure" means it is really right about 9 times in 10.`
+                  : `It sounded too unsure, so its "sure" numbers are sharpened (divided by ${report.temperature.toFixed(1)}) to match how often it is really right.`}
               </p>
             )}
             <p className="text-[15px] text-muted">

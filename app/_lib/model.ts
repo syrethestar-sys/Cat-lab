@@ -142,6 +142,44 @@ async function loadSaved() {
   return m;
 }
 
+// A model trained on few photos says "98% sure" far too often. This finds how much to
+// soften its confidence (a "temperature") so that when it says 90% it is right about 90%
+// of the time on photos it never saw. The guess itself never changes, only the % sure.
+function fitTemperature(m: tf.LayersModel, vxs: tf.Tensor, vys: tf.Tensor) {
+  const p = Array.from((m.predict(vxs) as tf.Tensor).dataSync());
+  const y = Array.from(vys.dataSync());
+  const logit = p.map((v) => {
+    const c = Math.min(Math.max(v, 1e-6), 1 - 1e-6);
+    return Math.log(c / (1 - c));
+  });
+  let best = 1;
+  let bestLoss = Infinity;
+  for (let t = 0.5; t <= 8; t += 0.05) {
+    let loss = 0;
+    for (let i = 0; i < p.length; i++) {
+      const q = Math.min(Math.max(1 / (1 + Math.exp(-logit[i] / t)), 1e-6), 1 - 1e-6);
+      loss -= y[i] ? Math.log(q) : Math.log(1 - q);
+    }
+    if (loss < bestLoss) {
+      bestLoss = loss;
+      best = t;
+    }
+  }
+  return best;
+}
+
+// The last layer is sigmoid(w · x + b). Dividing w and b by t gives sigmoid((w · x + b) / t),
+// so the softening lives inside the saved model and needs nothing extra to be stored.
+function applyTemperature(m: tf.LayersModel, t: number) {
+  const last = m.layers[m.layers.length - 1];
+  const [kernel, bias] = last.getWeights();
+  const k = kernel.div(t);
+  const b = bias.div(t);
+  last.setWeights([k, b]);
+  k.dispose();
+  b.dispose();
+}
+
 // ---- What the model looks like inside, for the screen ----
 
 // One small picture: width × width pixels, RGBA bytes.
@@ -230,6 +268,7 @@ function readMaps(spy: tf.LayersModel, photo: tf.Tensor3D): Inside["maps"] {
 }
 
 export type TrainResult = {
+  temperature: number | null; // how much its "sure" was softened (> 1) or sharpened (< 1); null = left as is
   accuracy: number; // on the photos it trained on, last round (0 to 1)
   valAccuracy: number | null; // on photos it never saw, last round (null if none were held back)
   heldOut: number; // how many photos were kept aside
@@ -369,10 +408,21 @@ export async function train(
       },
     });
 
+    // Soften (or sharpen) how sure it sounds, using the photos it never saw.
+    // Needs enough of them to be a fair measure.
+    let temperature: number | null = null;
+    if (vxs && vys && vIdx.length >= 20) {
+      const t = fitTemperature(m, vxs, vys);
+      if (Math.abs(t - 1) >= 0.1) {
+        applyTemperature(m, t);
+        temperature = t;
+      }
+    }
+
     // Stage 6: the model now lives in IndexedDB.
     onEvent({ stage: "save" });
     await m.save(MODEL_URL);
-    return { accuracy, valAccuracy, heldOut: vIdx.length };
+    return { temperature, accuracy, valAccuracy, heldOut: vIdx.length };
   } finally {
     tensors.forEach((t) => t.dispose());
     model?.dispose(); // also frees the spy, which shares its layers
