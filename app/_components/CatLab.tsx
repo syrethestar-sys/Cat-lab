@@ -33,7 +33,7 @@ export default function CatLab() {
   const [reached, setReached] = useState(1);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [skipped, setSkipped] = useState(0);
-  const [repeats, setRepeats] = useState(0); // photos skipped because they were saved already
+  const [reused, setReused] = useState(0); // photos saved before: the saved copy is shown again
   const [error, setError] = useState("");
   const [rounds, setRounds] = useState<Rounds>(30);
   const [training, setTraining] = useState(false);
@@ -62,6 +62,7 @@ export default function CatLab() {
   const [checking, setChecking] = useState<{ done: number; total: number } | null>(null);
   const [testUploading, setTestUploading] = useState(false);
   const [testError, setTestError] = useState("");
+  const [testNote, setTestNote] = useState(""); // e.g. photos that were saved before
 
   // Every visit starts empty: saved photos stay in Supabase but are not loaded here.
   // Only photos added in this visit are shown, labeled and trained on.
@@ -135,21 +136,22 @@ export default function CatLab() {
   async function addFiles(files: File[]) {
     const images = files.filter((f) => f.type.startsWith("image/"));
     setSkipped(files.length - images.length);
-    setRepeats(0);
+    setReused(0);
     setError("");
     for (const file of images) {
       const body = new FormData();
       body.append("file", file);
       body.append("ground", "training");
       const res = await fetch("/api/photos", { method: "POST", body });
+      const json = await res.json().catch(() => null);
       if (!res.ok) {
-        const json = await res.json().catch(() => null);
-        if (json?.duplicate === "same") setRepeats((n) => n + 1);
-        else setError(json?.error ?? "Could not upload that photo.");
+        setError(json?.error ?? "Could not upload that photo.");
         continue;
       }
-      const photo: Photo = await res.json();
-      setPhotos((ps) => [...ps, photo]);
+      // reused = saved before: nothing new is stored, the saved photo comes back with its label.
+      const photo: Photo & { reused?: boolean } = json;
+      if (photo.reused) setReused((n) => n + 1);
+      setPhotos((ps) => (ps.some((p) => p.id === photo.id) ? ps : [...ps, photo]));
     }
     changed();
   }
@@ -168,7 +170,7 @@ export default function CatLab() {
   function clearPreviews() {
     setPhotos([]);
     setSkipped(0);
-    setRepeats(0);
+    setReused(0);
     setError("");
     changed();
   }
@@ -300,9 +302,9 @@ export default function CatLab() {
       body.append("ground", "testing");
       const res = await fetch("/api/photos", { method: "POST", body });
       const json = await res.json().catch(() => null);
-      // A test photo tried before is not saved again; the saved one is guessed.
-      const photo: Photo | undefined = res.ok ? json : json?.duplicate === "same" ? json.photo : undefined;
-      if (!photo) throw new Error(json?.error ?? "Could not upload that photo.");
+      // A test photo tried before is not saved again; the saved one comes back and is guessed.
+      if (!res.ok) throw new Error(json?.error ?? "Could not upload that photo.");
+      const photo: Photo = json;
 
       const { loadPixels, predict } = await import("../_lib/model");
       const result = await predict(model, await loadPixels(photo.url));
@@ -320,24 +322,28 @@ export default function CatLab() {
     setTestError(images.length < files.length ? "Only image files can be added." : "");
     setTestResults(null);
     setTestUploading(true);
+    setTestNote("");
     let repeated = 0;
     for (const file of images) {
       const body = new FormData();
       body.append("file", file);
       body.append("ground", "testing");
       const res = await fetch("/api/photos", { method: "POST", body }).catch(() => null);
+      const json = await res?.json().catch(() => null);
       if (!res?.ok) {
-        const json = await res?.json().catch(() => null);
-        if (json?.duplicate === "same") repeated++;
-        else setTestError(json?.error ?? "Could not upload that photo.");
+        setTestError(json?.error ?? "Could not upload that photo.");
         continue;
       }
-      const photo: TestPhoto = await res.json();
-      setTestPhotos((ps) => [...ps, { id: photo.id, url: photo.url, label: null }]);
+      // reused = saved before: the saved test photo comes back with its label (the answer key).
+      const photo: TestPhoto & { reused?: boolean } = json;
+      if (photo.reused) repeated++;
+      setTestPhotos((ps) =>
+        ps.some((p) => p.id === photo.id) ? ps : [...ps, { id: photo.id, url: photo.url, label: photo.label }],
+      );
     }
     if (repeated > 0) {
-      setTestError((e) =>
-        `${e ? `${e} ` : ""}${repeated === 1 ? "1 photo was" : `${repeated} photos were`} already uploaded, so ${repeated === 1 ? "it was" : "they were"} skipped.`,
+      setTestNote(
+        `${repeated === 1 ? "1 photo was" : `${repeated} photos were`} saved before, so the saved ${repeated === 1 ? "copy is" : "copies are"} shown with ${repeated === 1 ? "its label" : "their labels"}.`,
       );
     }
     setTestUploading(false);
@@ -414,10 +420,11 @@ export default function CatLab() {
             {plural(skipped, "file")} skipped. Only image files can be added.
           </p>
         )}
-        {repeats > 0 && (
-          <p className="text-[15px] text-red">
-            {repeats === 1 ? "1 photo was" : `${repeats} photos were`} already uploaded, so{" "}
-            {repeats === 1 ? "it was" : "they were"} skipped.
+        {reused > 0 && (
+          <p className="text-[15px] text-muted">
+            {reused === 1 ? "1 photo was" : `${reused} photos were`} saved before, so the saved{" "}
+            {reused === 1 ? "copy is" : "copies are"} shown with {reused === 1 ? "its label" : "their labels"}.
+            Nothing was stored twice.
           </p>
         )}
         {photos.length > 0 && (
@@ -637,6 +644,7 @@ export default function CatLab() {
               checking={checking}
               uploading={testUploading}
               error={testError}
+              note={testNote}
               onAdd={addTestFiles}
               onLabel={labelTest}
               onRemove={removeTest}

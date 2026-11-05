@@ -94,9 +94,9 @@ export async function POST(request: Request) {
   );
 }
 
-// 409 = this exact photo is saved already. Nothing new is stored.
-// Same ground: send the saved photo back too (the quick test can still guess it).
-// Other ground: block it, so test photos are always photos the model never trained on.
+// This exact photo is saved already. Nothing new is stored.
+// Same ground: 200 with the saved photo and reused: true, so the page shows it again with its label.
+// Other ground: 409, blocked, so test photos are always photos the model never trained on.
 async function duplicate(
   saved: { id: string; label: string | null; ground: string; storagePath: string },
   ground: string,
@@ -114,12 +114,11 @@ async function duplicate(
     );
   }
   const { data } = await storage.createSignedUrl(saved.storagePath, SIGNED_LINK_SECONDS);
-  return Response.json(
-    {
-      error: "This photo is already uploaded.",
-      duplicate: "same",
-      photo: { id: saved.id, label: saved.label, ground: saved.ground, url: data?.signedUrl ?? "" },
-    },
-    { status: 409 },
-  );
+  return Response.json({
+    id: saved.id,
+    label: saved.label,
+    ground: saved.ground,
+    url: data?.signedUrl ?? "",
+    reused: true,
+  });
 }

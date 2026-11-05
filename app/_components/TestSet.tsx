@@ -15,6 +15,7 @@ type TestSetProps = {
   checking: { done: number; total: number } | null;
   uploading: boolean;
   error: string;
+  note: string; // plain info, not an error
   onAdd: (files: File[]) => void;
   onLabel: (id: string, label: Label) => void;
   onRemove: (id: string) => void;
@@ -32,6 +33,7 @@ export default function TestSet({
   checking,
   uploading,
   error,
+  note,
   onAdd,
   onLabel,
   onRemove,
@@ -69,6 +71,7 @@ export default function TestSet({
       />
       {uploading && <p className="text-muted">Uploading…</p>}
       {error && <p className="text-[15px] text-red">{error}</p>}
+      {note && <p className="text-[15px] text-muted">{note}</p>}
 
       {photos.length > 0 && !results && (
         <>
