@@ -34,6 +34,8 @@ export default function CatLab() {
   const [reached, setReached] = useState(1);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [skipped, setSkipped] = useState(0);
+  const [loadingSaved, setLoadingSaved] = useState(false);
+  const [loadedNote, setLoadedNote] = useState(""); // result of "Load my saved photos"
   const [reused, setReused] = useState(0); // photos saved before: the saved copy is shown again
   const [error, setError] = useState("");
   const [rounds, setRounds] = useState<Rounds>(30);
@@ -170,6 +172,32 @@ export default function CatLab() {
     changed();
   }
 
+  // Opt-in: puts every photo saved in Supabase on the page, with its label.
+  // A refresh still starts empty; this only runs when the button is pressed.
+  async function loadSaved() {
+    setLoadingSaved(true);
+    setLoadedNote("");
+    setReused(0);
+    setError("");
+    const res = await fetch("/api/photos?ground=training").catch(() => null);
+    if (!res?.ok) {
+      setError("Could not load your saved photos.");
+      setLoadingSaved(false);
+      return;
+    }
+    const rows: { id: string; url: string; label: Label | null }[] = await res.json();
+    const have = new Set(photos.map((p) => p.id));
+    const fresh = rows.filter((r) => r.url !== "" && !have.has(r.id));
+    setPhotos((ps) => [...ps, ...fresh.map(({ id, url, label }) => ({ id, url, label }))]);
+    setLoadedNote(
+      fresh.length === 0
+        ? "No more saved photos to load."
+        : `Loaded ${plural(fresh.length, "saved photo")} with their labels.`,
+    );
+    changed();
+    setLoadingSaved(false);
+  }
+
   async function removePhoto(id: string) {
     const res = await fetch(`/api/photos/${id}`, { method: "DELETE" });
     if (!res.ok) {
@@ -185,6 +213,7 @@ export default function CatLab() {
     setPhotos([]);
     setSkipped(0);
     setReused(0);
+    setLoadedNote("");
     setError("");
     changed();
   }
@@ -439,6 +468,18 @@ export default function CatLab() {
           text="You can pick many photos at once, or drop them here"
           onFiles={addFiles}
         />
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={loadSaved}
+            disabled={loadingSaved}
+            title="Adds every photo saved in Supabase to this page, with its label."
+            className="cursor-pointer rounded-full border-2 border-line px-3.5 py-1 text-[15px] font-bold text-muted hover:border-blue hover:text-blue focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-blue disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loadingSaved ? "Loading…" : "Load my saved photos"}
+          </button>
+          {loadedNote && <span className="text-[15px] text-muted">{loadedNote}</span>}
+        </div>
         {error && <p className="text-[15px] text-red">{error}</p>}
         {skipped > 0 && (
           <p className="text-[15px] text-red">
