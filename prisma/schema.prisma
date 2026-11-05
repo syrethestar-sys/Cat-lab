@@ -25,6 +25,8 @@ model TrainingRun {
   modelUrl  String // "indexeddb://cat-lab-model"
   continued Boolean  @default(false) // true = kept learning from the saved model
   model     String   @default("baby") // "baby" = learned from zero; "mobilenet" = older runs
+  photos    Int      @default(0) // labeled photos used (0 = not recorded, older runs)
+  heldOut   Int      @default(0) // photos kept aside to test (accuracy is on these when > 0)
   createdAt DateTime @default(now())
 
   @@map("training_runs")

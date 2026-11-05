@@ -13,6 +13,7 @@ import PhotoTile, { type Label } from "./PhotoTile";
 import Pill from "./Pill";
 import ProgressBar from "./ProgressBar";
 import RoundsPicker, { type Rounds } from "./RoundsPicker";
+import ScoreHistory, { type RunPoint } from "./ScoreHistory";
 import StepCard from "./StepCard";
 import Steps from "./Steps";
 import TestSet, { type TestGuess, type TestPhoto } from "./TestSet";
@@ -42,6 +43,7 @@ export default function CatLab() {
   const [history, setHistory] = useState<number[]>([]); // accuracy after each round
   const [newHistory, setNewHistory] = useState<(number | null)[]>([]); // on photos it never saw
   const [process, setProcess] = useState<ProcessState>(emptyProcess);
+  const [runs, setRuns] = useState<RunPoint[]>([]); // past runs: photos used vs never-seen accuracy
   const [mode, setMode] = useState<TrainMode>("fresh");
   const [hasModel, setHasModel] = useState(false); // a trained model is saved in this browser
   const [report, setReport] = useState<{
@@ -79,6 +81,17 @@ export default function CatLab() {
       // storage blocked: stay on Start fresh
     }
   }, []);
+
+  // Past runs for the "does it improve with more photos?" chart, when Step 3 opens.
+  async function loadRuns() {
+    const res = await fetch("/api/training-runs").catch(() => null);
+    if (!res?.ok) return;
+    const rows: (RunPoint & { photos: number })[] = await res.json();
+    setRuns(rows.filter((r) => r.photos > 0));
+  }
+  useEffect(() => {
+    if (step === 3) void loadRuns();
+  }, [step]);
 
   function pickMode(m: TrainMode) {
     setMode(m);
@@ -273,10 +286,20 @@ export default function CatLab() {
       const run = await fetch("/api/training-runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rounds, accuracy, modelUrl: MODEL_URL, continued, model: "baby" }),
+        body: JSON.stringify({
+          rounds,
+          accuracy,
+          modelUrl: MODEL_URL,
+          continued,
+          model: "baby",
+          photos: labeled.length,
+          heldOut: result.heldOut,
+        }),
       });
       if (!run.ok) {
         setError("The model is saved, but this training run was not recorded.");
+      } else {
+        void loadRuns();
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Training stopped.");
@@ -588,6 +611,7 @@ export default function CatLab() {
             </p>
           </div>
         )}
+        {!training && <ScoreHistory runs={runs} />}
         {error && <p className="text-[15px] text-red">{error}</p>}
         <HelpBox title="What is happening?">
           The model starts from zero: random numbers that know nothing about cats.

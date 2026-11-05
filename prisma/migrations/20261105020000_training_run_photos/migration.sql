@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "training_runs" ADD COLUMN     "heldOut" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN     "photos" INTEGER NOT NULL DEFAULT 0;
