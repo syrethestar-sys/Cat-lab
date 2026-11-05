@@ -12,6 +12,7 @@ model Photo {
   storagePath String   @unique // where the file is in Storage, e.g. training/abc.jpg
   label       String? // "cat", "not_cat", or null = not labeled yet
   ground      String   @default("training") // "training" or "testing"
+  fileHash    String?  @unique // SHA-256 of the file, so the same photo is never saved twice
   createdAt   DateTime @default(now())
 
   @@map("photos")

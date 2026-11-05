@@ -33,6 +33,7 @@ export default function CatLab() {
   const [reached, setReached] = useState(1);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [skipped, setSkipped] = useState(0);
+  const [repeats, setRepeats] = useState(0); // photos skipped because they were saved already
   const [error, setError] = useState("");
   const [rounds, setRounds] = useState<Rounds>(30);
   const [training, setTraining] = useState(false);
@@ -132,6 +133,7 @@ export default function CatLab() {
   async function addFiles(files: File[]) {
     const images = files.filter((f) => f.type.startsWith("image/"));
     setSkipped(files.length - images.length);
+    setRepeats(0);
     setError("");
     for (const file of images) {
       const body = new FormData();
@@ -139,8 +141,9 @@ export default function CatLab() {
       body.append("ground", "training");
       const res = await fetch("/api/photos", { method: "POST", body });
       if (!res.ok) {
-        const msg = (await res.json().catch(() => null))?.error;
-        setError(msg ?? "Could not upload that photo.");
+        const json = await res.json().catch(() => null);
+        if (json?.duplicate === "same") setRepeats((n) => n + 1);
+        else setError(json?.error ?? "Could not upload that photo.");
         continue;
       }
       const photo: Photo = await res.json();
@@ -163,6 +166,7 @@ export default function CatLab() {
   function clearPreviews() {
     setPhotos([]);
     setSkipped(0);
+    setRepeats(0);
     setError("");
     changed();
   }
@@ -281,11 +285,10 @@ export default function CatLab() {
       body.append("file", file);
       body.append("ground", "testing");
       const res = await fetch("/api/photos", { method: "POST", body });
-      if (!res.ok) {
-        const msg = (await res.json().catch(() => null))?.error;
-        throw new Error(msg ?? "Could not upload that photo.");
-      }
-      const photo: Photo = await res.json();
+      const json = await res.json().catch(() => null);
+      // A test photo tried before is not saved again; the saved one is guessed.
+      const photo: Photo | undefined = res.ok ? json : json?.duplicate === "same" ? json.photo : undefined;
+      if (!photo) throw new Error(json?.error ?? "Could not upload that photo.");
 
       const { loadPixels, predict } = await import("../_lib/model");
       const result = await predict(model, await loadPixels(photo.url));
@@ -303,18 +306,25 @@ export default function CatLab() {
     setTestError(images.length < files.length ? "Only image files can be added." : "");
     setTestResults(null);
     setTestUploading(true);
+    let repeated = 0;
     for (const file of images) {
       const body = new FormData();
       body.append("file", file);
       body.append("ground", "testing");
       const res = await fetch("/api/photos", { method: "POST", body }).catch(() => null);
       if (!res?.ok) {
-        const msg = (await res?.json().catch(() => null))?.error;
-        setTestError(msg ?? "Could not upload that photo.");
+        const json = await res?.json().catch(() => null);
+        if (json?.duplicate === "same") repeated++;
+        else setTestError(json?.error ?? "Could not upload that photo.");
         continue;
       }
       const photo: TestPhoto = await res.json();
       setTestPhotos((ps) => [...ps, { id: photo.id, url: photo.url, label: null }]);
+    }
+    if (repeated > 0) {
+      setTestError((e) =>
+        `${e ? `${e} ` : ""}${repeated === 1 ? "1 photo was" : `${repeated} photos were`} already uploaded, so ${repeated === 1 ? "it was" : "they were"} skipped.`,
+      );
     }
     setTestUploading(false);
   }
@@ -388,6 +398,12 @@ export default function CatLab() {
         {skipped > 0 && (
           <p className="text-[15px] text-red">
             {plural(skipped, "file")} skipped. Only image files can be added.
+          </p>
+        )}
+        {repeats > 0 && (
+          <p className="text-[15px] text-red">
+            {repeats === 1 ? "1 photo was" : `${repeats} photos were`} already uploaded, so{" "}
+            {repeats === 1 ? "it was" : "they were"} skipped.
           </p>
         )}
         {photos.length > 0 && (
@@ -581,6 +597,7 @@ export default function CatLab() {
               text="One photo at a time, or drop it here"
               onFiles={guessFile}
             />
+            {error && <p className="text-[15px] text-red">{error}</p>}
             {guessing && (
               <p className="text-center text-muted">Looking at your photo…</p>
             )}
@@ -602,7 +619,7 @@ export default function CatLab() {
             />
           </>
         )}
-        {error && <p className="text-[15px] text-red">{error}</p>}
+        {error && modelState !== "ready" && <p className="text-[15px] text-red">{error}</p>}
         <HelpBox title="Why test?">
           Test photos are saved apart from your training photos, so the model
           never learns from them. That shows how it does on photos it has not

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { db } from "@/app/_lib/db";
 import { SIGNED_LINK_SECONDS, storage } from "@/app/_lib/storage";
 
@@ -50,6 +51,13 @@ export async function POST(request: Request) {
     return Response.json({ error: "Unknown ground" }, { status: 400 });
   }
 
+  // Same file bytes = same fingerprint, whatever the file is called.
+  const fileHash = createHash("sha256")
+    .update(Buffer.from(await file.arrayBuffer()))
+    .digest("hex");
+  const saved = await db.photo.findUnique({ where: { fileHash } });
+  if (saved) return duplicate(saved, ground);
+
   const ext =
     file.name
       .split(".")
@@ -65,9 +73,12 @@ export async function POST(request: Request) {
 
   let photo;
   try {
-    photo = await db.photo.create({ data: { storagePath, ground } });
+    photo = await db.photo.create({ data: { storagePath, ground, fileHash } });
   } catch {
     await storage.remove([storagePath]); // no row, so don't keep an orphan file
+    // The same photo sent twice at the same moment: the first one won.
+    const first = await db.photo.findUnique({ where: { fileHash } });
+    if (first) return duplicate(first, ground);
     return Response.json({ error: "Could not save the photo" }, { status: 500 });
   }
 
@@ -80,5 +91,35 @@ export async function POST(request: Request) {
       url: data?.signedUrl ?? "",
     },
     { status: 201 },
+  );
+}
+
+// 409 = this exact photo is saved already. Nothing new is stored.
+// Same ground: send the saved photo back too (the quick test can still guess it).
+// Other ground: block it, so test photos are always photos the model never trained on.
+async function duplicate(
+  saved: { id: string; label: string | null; ground: string; storagePath: string },
+  ground: string,
+) {
+  if (saved.ground !== ground) {
+    return Response.json(
+      {
+        error:
+          saved.ground === "training"
+            ? "This photo is already a training photo. Test with photos the model never saw."
+            : "This photo is already a test photo. Pick other photos to train on.",
+        duplicate: "other",
+      },
+      { status: 409 },
+    );
+  }
+  const { data } = await storage.createSignedUrl(saved.storagePath, SIGNED_LINK_SECONDS);
+  return Response.json(
+    {
+      error: "This photo is already uploaded.",
+      duplicate: "same",
+      photo: { id: saved.id, label: saved.label, ground: saved.ground, url: data?.signedUrl ?? "" },
+    },
+    { status: 409 },
   );
 }

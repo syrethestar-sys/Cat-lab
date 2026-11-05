@@ -22,7 +22,7 @@ Photos and labels go **through our API routes**. The browser never talks to Supa
 3. Train → TensorFlow.js in the browser (10, 30 or 50 rounds, default 30) → model to `indexeddb://cat-lab-model` → `POST /api/training-runs`
 4. Test → load the model from IndexedDB → upload a photo with `ground = testing` → guess → "Cat, 87% sure"
 
-Tables: `photos` (id, storagePath, label, ground, createdAt) and `training_runs` (id, rounds, accuracy, modelUrl, continued, createdAt).
+Tables: `photos` (id, storagePath, label, ground, fileHash, createdAt) and `training_runs` (id, rounds, accuracy, modelUrl, continued, createdAt).
 
 The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 
@@ -36,7 +36,9 @@ The step-by-step build guide is in `GUIDE.md`. Follow it in order.
 - Screen 4 (Test) is done and verified: loads the model from IndexedDB, uploads one photo with `ground = testing` (never used for training), guesses, and shows e.g. "A cat, 100% sure". A model saved in the browser unlocks Step 4 after a reload (`app/_lib/saved-model.ts`).
 - Step 4 test score (verified): below the quick test, a **Test score** section (`app/_components/TestSet.tsx`) lets students add many test photos (`ground = testing`), label each one first (the answer key, `PATCH /api/photos/[id]`), then "Check the model". It shows "Right on 9 of 10 (90%)", a per-group breakdown, "Last check: 70%" to compare, and a result grid (`ResultTile.tsx`) with wrong guesses first. Test photos and results live in CatLab state (they survive switching steps, not a reload); retraining clears the result so it is never stale. The score is not saved in the database. `predictMany()` in `app/_lib/model.ts` guesses many photos.
 - GUIDE.md Step 0 is done: packages, `.env.local` (incl. `SUPABASE_SERVICE_ROLE_KEY`), private `photos` bucket, `certs/supabase-ca.crt`, tables `photos` and `training_runs` migrated, helpers `app/_lib/db.ts` and `app/_lib/storage.ts` (verified: the server reads the database and Storage).
-- All 4 screens are built. Remaining ideas: stop duplicate uploads (file hash), real-photo accuracy checks, README.
+- Duplicate uploads are stopped (verified): `POST /api/photos` saves a SHA-256 of each file in `photos.fileHash` (unique). A repeat returns 409 and nothing is stored: same ground → `duplicate: "same"` plus the saved photo (Step 1 and the Test score skip it with "1 photo was already uploaded, so it was skipped."; the quick test still guesses it); other ground → `duplicate: "other"`, blocked with "This photo is already a training photo. Test with photos the model never saw." All saved photos have a fingerprint (old ones were filled in once; 12 old duplicates were deleted).
+- `app/_lib/db.ts` replaces its cached client when `prisma generate` makes new client code, so the dev server no longer needs a restart after a schema change.
+- All 4 screens are built. Remaining ideas: real-photo accuracy checks, README.
 - Run Prisma with `--config prisma.config.ts` unless the extra `prisma7.config.ts` is gone.
 
 ## Code
