@@ -90,10 +90,10 @@ export default function ScoreHistory({ runs }: { runs: RunPoint[] }) {
       <p className="text-center text-[15px]">
         Latest: <b>{Math.round(last.accuracy * 100)}%</b> on {last.heldOut} photos it never saw, after
         learning from {last.photos} photos.{" "}
-        {gap > 0 ? `${gap} points to the goal.` : "That reaches the goal."}
+        {gap > 0 ? `${gap} ${gap === 1 ? "point" : "points"} to the goal.` : "That reaches the goal."}
       </p>
       <p className="text-center text-[13px] text-muted">
-        Each dot is one training run. Each never-seen photo is worth {step} points of the score, so a few
+        Each dot is one training run. Each never-seen photo is worth {step} {step === 1 ? "point" : "points"} of the score, so a few
         points of change can be luck. Trust the direction of many dots, not one. Add more photos, train
         again, and watch the dots.
       </p>
