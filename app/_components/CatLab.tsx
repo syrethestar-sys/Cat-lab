@@ -56,6 +56,7 @@ export default function CatLab() {
     temperature: number | null; // how much its "sure" was changed after training
   } | null>(null);
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "missing">("idle");
+  const [modelNote, setModelNote] = useState(""); // which saved model Step 4 is using
   const [guess, setGuess] = useState<Guess | null>(null);
   const [guessing, setGuessing] = useState(false);
   const modelRef = useRef<LayersModel | null>(null);
@@ -108,20 +109,34 @@ export default function CatLab() {
   // Keep learning only works when there is a saved model to start from.
   const keepLearning = hasModel && mode === "keep";
 
-  // Load the saved model from IndexedDB when Step 4 opens.
+  // Every time Step 4 opens, load the latest saved model from IndexedDB (so it is never an old copy).
   useEffect(() => {
-    if (step !== 4 || modelRef.current) return;
+    if (step !== 4) return;
     let cancelled = false;
-    setModelState("loading");
+    if (!modelRef.current) setModelState("loading");
     import("../_lib/model")
-      .then((m) => m.loadModel())
-      .then((model) => {
-        if (cancelled) return;
+      .then(async (m) => ({ m, model: await m.loadModel() }))
+      .then(({ m, model }) => {
+        if (cancelled) {
+          model.dispose();
+          return;
+        }
+        const old = modelRef.current;
         modelRef.current = model;
+        old?.dispose();
+        const info = m.modelInfo(model);
+        setModelNote(
+          info
+            ? `Using the model you trained on ${new Date(info.trainedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}, learned from ${plural(info.photos, "photo")}` +
+                (info.valAccuracy !== null
+                  ? `, right on ${Math.round(info.valAccuracy * 100)}% of ${plural(info.heldOut, "photo")} it never saw.`
+                  : ".")
+            : "Using the model saved in this browser (it was trained before details were kept).",
+        );
         setModelState("ready");
       })
       .catch(() => {
-        if (!cancelled) setModelState("missing");
+        if (!cancelled && !modelRef.current) setModelState("missing");
       });
     return () => {
       cancelled = true;
@@ -255,6 +270,7 @@ export default function CatLab() {
     modelRef.current?.dispose();
     modelRef.current = null;
     setModelState("idle");
+    setModelNote("");
     try {
       // Ask the server for the labeled photos, with fresh 1-hour links.
       const res = await fetch("/api/photos?ground=training");
@@ -698,6 +714,7 @@ export default function CatLab() {
         )}
         {modelState === "ready" && (
           <>
+            {modelNote && <p className="text-center text-[15px] text-muted">{modelNote}</p>}
             <UploadBox
               multiple={false}
               title={guess ? "Try another photo" : "Choose a photo to test"}

@@ -29,6 +29,18 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
+// Same, but tries again a few times: one busy moment on the network should not stop a whole run.
+async function loadImageRetry(url: string) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await loadImage(url);
+    } catch (e) {
+      if (attempt >= 3) throw e;
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+}
+
 // Shrink a photo to a 64 × 64 canvas, cropped to a square.
 function shrink(img: HTMLImageElement) {
   const c = document.createElement("canvas");
@@ -267,6 +279,21 @@ function readMaps(spy: tf.LayersModel, photo: tf.Tensor3D): Inside["maps"] {
   }
 }
 
+// Saved inside the model itself, so Step 4 can say which model it is using.
+export type ModelInfo = {
+  trainedAt: number; // Date.now() when training finished
+  photos: number; // labeled photos it used
+  heldOut: number; // photos kept aside to test
+  valAccuracy: number | null; // right on those, 0 to 1
+  temperature: number | null;
+};
+
+// What was saved with a loaded model (null for models saved before this was kept).
+export function modelInfo(m: tf.LayersModel): ModelInfo | null {
+  const info = m.getUserDefinedMetadata() as Partial<ModelInfo> | undefined;
+  return info && typeof info.trainedAt === "number" ? (info as ModelInfo) : null;
+}
+
 export type TrainResult = {
   temperature: number | null; // how much its "sure" was softened (> 1) or sharpened (< 1); null = left as is
   accuracy: number; // on the photos it trained on, last round (0 to 1)
@@ -313,14 +340,17 @@ export async function train(
     // Stage 1: download every photo.
     let loaded = 0;
     onEvent({ stage: "load", done: 0, total });
-    const images = await Promise.all(
-      photos.map((p) =>
-        loadImage(p.url).then((img) => {
-          onEvent({ stage: "load", done: ++loaded, total });
-          return img;
-        }),
-      ),
-    );
+    // A few at a time: asking for hundreds at once makes some of them fail.
+    const images: HTMLImageElement[] = new Array(total);
+    let next = 0;
+    const worker = async () => {
+      while (next < total) {
+        const i = next++;
+        images[i] = await loadImageRetry(photos[i].url);
+        onEvent({ stage: "load", done: ++loaded, total });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(12, total) }, worker));
 
     // Stage 2: shrink each photo to 64 × 64 pixels.
     const canvases: HTMLCanvasElement[] = [];
@@ -419,8 +449,15 @@ export async function train(
       }
     }
 
-    // Stage 6: the model now lives in IndexedDB.
+    // Stage 6: the model now lives in IndexedDB, with a note about how it was trained.
     onEvent({ stage: "save" });
+    m.setUserDefinedMetadata({
+      trainedAt: Date.now(),
+      photos: total,
+      heldOut: vIdx.length,
+      valAccuracy,
+      temperature,
+    } satisfies ModelInfo);
     await m.save(MODEL_URL);
     return { temperature, accuracy, valAccuracy, heldOut: vIdx.length };
   } finally {
