@@ -16,11 +16,12 @@ export async function GET(request: Request) {
     where: { ground },
     orderBy: { createdAt: "asc" },
   });
-  const { data } = await storage.createSignedUrls(
-    rows.map((r) => r.storagePath),
-    SIGNED_LINK_SECONDS,
-  );
-  const links = new Map(data?.map((d) => [d.path, d.signedUrl]));
+  // Ask for links in batches: one request for 1,000+ paths comes back empty.
+  const paths = rows.map((r) => r.storagePath);
+  const batches = [];
+  for (let i = 0; i < paths.length; i += 200) batches.push(paths.slice(i, i + 200));
+  const results = await Promise.all(batches.map((b) => storage.createSignedUrls(b, SIGNED_LINK_SECONDS)));
+  const links = new Map(results.flatMap((r) => r.data ?? []).map((d) => [d.path, d.signedUrl]));
 
   return Response.json(
     rows.map((r) => ({

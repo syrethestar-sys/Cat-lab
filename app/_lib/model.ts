@@ -66,6 +66,32 @@ export async function loadPixels(url: string): Promise<HTMLCanvasElement> {
   return shrink(await loadImage(url));
 }
 
+// A randomly changed copy of every photo: zoomed in on a random part (60-100%), maybe flipped,
+// with its brightness, contrast and colors nudged. A new draw each round.
+function varied(source: tf.Tensor4D): tf.Tensor4D {
+  const xs = source;
+  const n = xs.shape[0];
+  const r = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
+  const boxes: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    const s = r(0.6, 1);
+    const h = Math.min(1, s * r(0.9, 1.1));
+    const w = Math.min(1, s * r(0.9, 1.1));
+    const y1 = r(0, 1 - h);
+    const x1 = r(0, 1 - w);
+    boxes.push([y1, x1, y1 + h, x1 + w]);
+  }
+  return tf.tidy(() => {
+    const cropped = tf.image.cropAndResize(xs, tf.tensor2d(boxes), tf.zeros([n], "int32"), [SIZE, SIZE]);
+    const flip = tf.tensor1d(Array.from({ length: n }, () => (Math.random() < 0.5 ? 1 : 0))).reshape([n, 1, 1, 1]);
+    const x = flip.mul(cropped.reverse(2)).add(flip.neg().add(1).mul(cropped));
+    const contrast = tf.tensor1d(Array.from({ length: n }, () => r(0.7, 1.3))).reshape([n, 1, 1, 1]);
+    const bright = tf.tensor1d(Array.from({ length: n }, () => r(-0.15, 0.15))).reshape([n, 1, 1, 1]);
+    const tint = tf.tensor2d(Array.from({ length: n }, () => [r(0.9, 1.1), r(0.9, 1.1), r(0.9, 1.1)])).reshape([n, 1, 1, 3]);
+    return x.sub(0.5).mul(contrast).add(0.5).add(bright).mul(tint).clipByValue(0, 1) as tf.Tensor4D;
+  });
+}
+
 function mirrored(c: HTMLCanvasElement) {
   const m = document.createElement("canvas");
   m.width = m.height = SIZE;
@@ -92,7 +118,7 @@ function compile(m: tf.LayersModel) {
 // A small CNN that starts from random numbers.
 function buildModel() {
   const m = tf.sequential();
-  [8, 16, 32].forEach((filters, i) => {
+  [8, 32, 64].forEach((filters, i) => {
     m.add(
       tf.layers.conv2d({
         ...(i === 0 ? { inputShape: [SIZE, SIZE, 3] } : {}),
@@ -107,7 +133,7 @@ function buildModel() {
   });
   m.add(tf.layers.flatten());
   m.add(tf.layers.dropout({ rate: 0.4 }));
-  m.add(tf.layers.dense({ units: 32, activation: "relu" }));
+  m.add(tf.layers.dense({ units: 64, activation: "relu" }));
   m.add(tf.layers.dropout({ rate: 0.4 }));
   m.add(tf.layers.dense({ units: 1, activation: "sigmoid" })); // near 1 = cat, near 0 = not cat
   compile(m);
@@ -299,6 +325,7 @@ export type TrainResult = {
   accuracy: number; // on the photos it trained on, last round (0 to 1)
   valAccuracy: number | null; // on photos it never saw, last round (null if none were held back)
   heldOut: number; // how many photos were kept aside
+  savedPath: string | null; // where the server copy of the model is kept (null = upload failed)
 };
 
 // What train() is doing right now, in order, so the screen can show it.
@@ -360,13 +387,9 @@ export async function train(
     }
     await tf.nextFrame();
 
-    // Stage 3: every photo, and its mirror image, becomes 12,288 numbers (0 to 1).
-    const px: tf.Tensor3D[] = [];
-    const mirrorPx: tf.Tensor3D[] = [];
+    // Stage 3: every photo becomes 12,288 numbers (0 to 1).
     for (let i = 0; i < total; i++) {
       const mirror = mirrored(canvases[i]);
-      px.push(toTensor(canvases[i]));
-      mirrorPx.push(toTensor(mirror));
       onEvent({
         stage: "pixels",
         done: i + 1,
@@ -375,7 +398,6 @@ export async function train(
       });
       if (i % 10 === 9) await tf.nextFrame(); // let the screen update
     }
-    tensors.push(...px, ...mirrorPx);
 
     // Stage 4: keep about 20% of each group aside. Mirror copies stay with their photo.
     // Only photos whose id score is under 0.2 can be held back, lowest first, and at most
@@ -398,11 +420,14 @@ export async function train(
     onEvent({ stage: "split", train: trainIdx.length, heldOut: vIdx.length });
     const y = (i: number) => (photos[i].label === "cat" ? 1 : 0);
 
-    const xs = tf.stack([...trainIdx.map((i) => px[i]), ...trainIdx.map((i) => mirrorPx[i])]);
-    const ys = tf.tensor2d([...trainIdx.map(y), ...trainIdx.map(y)], [trainIdx.length * 2, 1]);
-    const vxs = vIdx.length ? tf.stack(vIdx.map((i) => px[i])) : null;
+    // Photos stay as small canvases (in memory, not on the graphics card). Every round, they are turned
+    // into numbers a chunk at a time, each randomly changed (see varied()), so the model cannot just
+    // memorize exact pixels, and the big picture set never has to fit on the graphics card at once.
+    const batchOf = (idx: number[]) => tf.tidy(() => tf.stack(idx.map((i) => toTensor(canvases[i]))) as tf.Tensor4D);
+    const vxs = vIdx.length ? batchOf(vIdx) : null;
     const vys = vIdx.length ? tf.tensor2d(vIdx.map(y), [vIdx.length, 1]) : null;
-    tensors.push(xs, ys, ...(vxs ? [vxs] : []), ...(vys ? [vys] : []));
+    const spyPx = toTensor(canvases[vIdx[0] ?? 0]);
+    tensors.push(spyPx, ...(vxs ? [vxs] : []), ...(vys ? [vys] : []));
 
     // Stage 5: learn. A new random model, or the saved one.
     model = model ?? buildModel();
@@ -415,28 +440,44 @@ export async function train(
     const look = (): Inside => ({
       filters: readFilters(m),
       change: changeSince(startKernel, kernelOf(m).w),
-      maps: readMaps(s, px[spyIndex]),
+      maps: readMaps(s, spyPx),
     });
     onEvent({ stage: "start", spy: canvases[spyIndex], inside: look() });
     await tf.nextFrame();
 
     let accuracy = 0;
     let valAccuracy: number | null = null;
-    await m.fit(xs, ys, {
-      epochs: rounds,
-      batchSize: 16,
-      shuffle: true,
-      validationData: vxs && vys ? [vxs, vys] : undefined,
-      callbacks: {
-        onEpochEnd: async (epoch, logs) => {
-          accuracy = Number(logs?.acc ?? logs?.accuracy ?? 0);
-          const v = logs?.val_acc ?? logs?.val_accuracy;
-          valAccuracy = v === undefined ? null : Number(v);
-          onEvent({ stage: "round", round: epoch + 1, accuracy, valAccuracy, inside: look() });
-          await tf.nextFrame(); // let the screen update
-        },
-      },
-    });
+    // Count cats and not-cats so the smaller group counts for more (otherwise "not cat" wins by size).
+    const cats = trainIdx.filter((i) => y(i) === 1).length;
+    const others = trainIdx.length - cats;
+    const classWeight = cats && others ? { 0: trainIdx.length / (2 * others), 1: trainIdx.length / (2 * cats) } : undefined;
+    const CHUNK = 128;
+    for (let round = 1; round <= rounds; round++) {
+      // A new order every round, a chunk of photos at a time.
+      const order = [...trainIdx].sort(() => Math.random() - 0.5);
+      let right = 0;
+      for (let c = 0; c < order.length; c += CHUNK) {
+        const idx = order.slice(c, c + CHUNK);
+        const raw = batchOf(idx);
+        const seen = varied(raw);
+        raw.dispose();
+        const cy = tf.tensor2d(idx.map(y), [idx.length, 1]);
+        const h = await m.fit(seen, cy, { epochs: 1, batchSize: 16, shuffle: true, classWeight });
+        seen.dispose();
+        cy.dispose();
+        right += Number(h.history.acc?.[0] ?? h.history.accuracy?.[0] ?? 0) * idx.length;
+      }
+      accuracy = right / order.length;
+      valAccuracy = null;
+      if (vxs && vys) {
+        const [loss, acc] = m.evaluate(vxs, vys, { batchSize: 32 }) as tf.Scalar[];
+        valAccuracy = (await acc.data())[0];
+        loss.dispose();
+        acc.dispose();
+      }
+      onEvent({ stage: "round", round, accuracy, valAccuracy, inside: look() });
+      await tf.nextFrame(); // let the screen update
+    }
 
     // Soften (or sharpen) how sure it sounds, using the photos it never saw.
     // Needs enough of them to be a fair measure.
@@ -459,11 +500,73 @@ export async function train(
       temperature,
     } satisfies ModelInfo);
     await m.save(MODEL_URL);
-    return { temperature, accuracy, valAccuracy, heldOut: vIdx.length };
+    const savedPath = await uploadCopy(m);
+    return { temperature, accuracy, valAccuracy, heldOut: vIdx.length, savedPath };
   } finally {
     tensors.forEach((t) => t.dispose());
     model?.dispose(); // also frees the spy, which shares its layers
   }
+}
+
+// Also keeps a copy on the server (Storage, through our API). Returns where, or null if that failed:
+// the browser copy is what Step 4 uses, so a failed upload never fails training.
+async function uploadCopy(m: tf.LayersModel): Promise<string | null> {
+  try {
+    const path = await m.save(
+      tf.io.withSaveHandler(async (a) => {
+        const form = new FormData();
+        form.append(
+          "model.json",
+          new Blob(
+            [
+              JSON.stringify({
+                modelTopology: a.modelTopology,
+                format: a.format,
+                generatedBy: a.generatedBy,
+                convertedBy: a.convertedBy,
+                userDefinedMetadata: a.userDefinedMetadata,
+                weightsManifest: [{ paths: ["model.weights.bin"], weights: a.weightSpecs }],
+              }),
+            ],
+            { type: "application/json" },
+          ),
+          "model.json",
+        );
+        form.append("model.weights.bin", new Blob([a.weightData as ArrayBuffer]), "model.weights.bin");
+        const res = await fetch("/api/models", { method: "POST", body: form });
+        if (!res.ok) throw new Error("upload failed");
+        const { path } = await res.json();
+        return { modelArtifactsInfo: { dateSaved: new Date(), modelTopologyType: "JSON" }, responses: [], path } as tf.io.SaveResult & { path: string };
+      }),
+    );
+    return (path as unknown as { path?: string }).path ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Downloads the newest model copy from the server and saves it in this browser (replacing the old one).
+export async function loadFromServer() {
+  const link = await fetch("/api/models/latest");
+  if (!link.ok) throw new Error((await link.json().catch(() => null))?.error ?? "Could not find a saved model.");
+  const { jsonUrl, weightsUrl } = await link.json();
+  const [json, weights] = await Promise.all([fetch(jsonUrl), fetch(weightsUrl)]);
+  if (!json.ok || !weights.ok) throw new Error("Could not download the saved model.");
+  const topology = await json.json();
+  const m = await tf.loadLayersModel(
+    tf.io.fromMemory({
+      modelTopology: topology.modelTopology,
+      weightSpecs: topology.weightsManifest[0].weights,
+      weightData: await weights.arrayBuffer(),
+      userDefinedMetadata: topology.userDefinedMetadata,
+    }),
+  );
+  if (!isBaby(m)) {
+    m.dispose();
+    throw new Error("The model on the server is from an older version.");
+  }
+  await m.save(MODEL_URL);
+  return m;
 }
 
 // Throws if nothing usable is saved (nothing saved, or saved by an older version of this app).

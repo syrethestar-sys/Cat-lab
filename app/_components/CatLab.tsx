@@ -19,6 +19,7 @@ import Steps from "./Steps";
 import TestSet, { type TestGuess, type TestPhoto } from "./TestSet";
 import TrainingProcess, { emptyProcess, type ProcessState } from "./TrainingProcess";
 import UploadBox from "./UploadBox";
+import type { ModelInfo } from "../_lib/model";
 import { hasSavedModel } from "../_lib/saved-model";
 
 type Photo = { id: string; url: string; label: Label | null };
@@ -109,6 +110,40 @@ export default function CatLab() {
   // Keep learning only works when there is a saved model to start from.
   const keepLearning = hasModel && mode === "keep";
 
+  const [fetching, setFetching] = useState(false);
+  // Replace this browser's model with the newest copy kept on the server.
+  async function fetchServerModel() {
+    setFetching(true);
+    setError("");
+    try {
+      const m = await import("../_lib/model");
+      const model = await m.loadFromServer();
+      const old = modelRef.current;
+      modelRef.current = model;
+      old?.dispose();
+      showModel(m.modelInfo(model));
+      setHasModel(true);
+      setGuess(null);
+      setTestResults(null);
+      setModelState("ready");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the model from the server.");
+    } finally {
+      setFetching(false);
+    }
+  }
+
+  function showModel(info: ModelInfo | null) {
+        setModelNote(
+          info
+            ? `Using the model you trained on ${new Date(info.trainedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}, learned from ${plural(info.photos, "photo")}` +
+                (info.valAccuracy !== null
+                  ? `, right on ${Math.round(info.valAccuracy * 100)}% of ${plural(info.heldOut, "photo")} it never saw.`
+                  : ".")
+            : "Using the model saved in this browser (it was trained before details were kept).",
+        );
+  }
+
   // Every time Step 4 opens, load the latest saved model from IndexedDB (so it is never an old copy).
   useEffect(() => {
     if (step !== 4) return;
@@ -124,15 +159,7 @@ export default function CatLab() {
         const old = modelRef.current;
         modelRef.current = model;
         old?.dispose();
-        const info = m.modelInfo(model);
-        setModelNote(
-          info
-            ? `Using the model you trained on ${new Date(info.trainedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}, learned from ${plural(info.photos, "photo")}` +
-                (info.valAccuracy !== null
-                  ? `, right on ${Math.round(info.valAccuracy * 100)}% of ${plural(info.heldOut, "photo")} it never saw.`
-                  : ".")
-            : "Using the model saved in this browser (it was trained before details were kept).",
-        );
+        showModel(m.modelInfo(model));
         setModelState("ready");
       })
       .catch(() => {
@@ -336,7 +363,7 @@ export default function CatLab() {
         body: JSON.stringify({
           rounds,
           accuracy,
-          modelUrl: MODEL_URL,
+          modelUrl: result.savedPath ?? MODEL_URL,
           continued,
           model: "baby",
           photos: labeled.length,
@@ -345,6 +372,9 @@ export default function CatLab() {
       });
       if (!run.ok) {
         setError("The model is saved, but this training run was not recorded.");
+      } else if (!result.savedPath) {
+        setError("The model is saved in this browser, but the copy on the server could not be stored.");
+        void loadRuns();
       } else {
         void loadRuns();
       }
@@ -709,12 +739,20 @@ export default function CatLab() {
         {modelState === "missing" && (
           <HelpBox title="No model yet.">
             There is no trained model saved in this browser. Go back and train
-            it first.
+            it first, or load the newest model kept on the server.
           </HelpBox>
+        )}
+        {modelState === "missing" && (
+          <MainButton onClick={fetchServerModel} locked={fetching}>
+            {fetching ? "Loading…" : "Load latest model from server"}
+          </MainButton>
         )}
         {modelState === "ready" && (
           <>
             {modelNote && <p className="text-center text-[15px] text-muted">{modelNote}</p>}
+            <MainButton onClick={fetchServerModel} locked={fetching}>
+              {fetching ? "Loading…" : "Load latest model from server"}
+            </MainButton>
             <UploadBox
               multiple={false}
               title={guess ? "Try another photo" : "Choose a photo to test"}
